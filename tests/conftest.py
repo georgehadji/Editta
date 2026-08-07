@@ -1,0 +1,22 @@
+"""Shared pytest fixtures."""
+
+import os
+
+import pytest
+
+_REQUIRED_ENV = {
+    "EDITTA_DATABASE_URL": "postgresql+asyncpg://editta:editta@localhost:5432/editta",
+    "EDITTA_ANTHROPIC_API_KEY": "test-key",
+    "EDITTA_S3_ENDPOINT_URL": "http://localhost:9000",
+    "EDITTA_S3_BUCKET": "editta-test",
+    "EDITTA_S3_ACCESS_KEY": "test",
+    "EDITTA_S3_SECRET_KEY": "test",
+    "EDITTA_SESSION_SECRET": "test-session-secret",
+}
+
+
+@pytest.fixture(autouse=True)
+def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in _REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    os.environ.pop("EDITTA_ENVIRONMENT", None)
