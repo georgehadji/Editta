@@ -1,1 +1,28 @@
-"""Token/cost estimation and per-job budget guardrails. (Phase 1)"""
+"""Token/cost estimation and per-job budget guardrail. Pricing: claude-opus-5 (PLAN.md §4)."""
+
+from editta.domain.errors import BudgetExceeded
+
+INPUT_USD_PER_MTOK = 5.0
+OUTPUT_USD_PER_MTOK = 25.0
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.1
+
+
+def estimate_cost_usd(
+    *,
+    cache_write_tokens: int,
+    cache_read_tokens: int,
+    plain_input_tokens: int,
+    output_tokens: int,
+) -> float:
+    weighted_input = (
+        cache_write_tokens * CACHE_WRITE_MULTIPLIER
+        + cache_read_tokens * CACHE_READ_MULTIPLIER
+        + plain_input_tokens
+    )
+    return weighted_input / 1_000_000 * INPUT_USD_PER_MTOK + output_tokens / 1_000_000 * OUTPUT_USD_PER_MTOK
+
+
+def check_budget(projected_usd: float, ceiling_usd: float) -> None:
+    if projected_usd > ceiling_usd:
+        raise BudgetExceeded(projected_usd, ceiling_usd)
