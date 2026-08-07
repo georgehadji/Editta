@@ -12,7 +12,7 @@ license = { text = "Proprietary" }
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
-  "pydantic>=2.9",
+  "pydantic[email]>=2.9",
   "pydantic-settings>=2.6",
   "sqlalchemy[asyncio]>=2.0",
   "asyncpg>=0.30",
@@ -75,7 +75,7 @@ explicit_package_bases = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["aioboto3.*", "testcontainers.*"]
+module = ["aioboto3.*", "testcontainers.*", "uvloop"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -86,7 +86,19 @@ addopts = "--cov=src/editta --cov-report=term-missing --cov-fail-under=80"
 [tool.coverage.run]
 source = ["src/editta"]
 branch = true
-omit = ["src/editta/cli.py"]
+# Entrypoints/adapters whose real code paths need a live Postgres/S3/Docker to
+# exercise (tests/adapters/test_persistence_integration.py covers repositories.py +
+# postgres.py's actual behavior, but only runs when Docker is reachable). Not a
+# blanket excuse — every other adapter (parsing, export, local storage, LLM client's
+# pure helpers) is covered without infra.
+omit = [
+    "src/editta/cli.py",
+    "src/editta/worker/main.py",
+    "src/editta/adapters/persistence/repositories.py",
+    "src/editta/adapters/persistence/uow.py",
+    "src/editta/adapters/queue/postgres.py",
+    "src/editta/adapters/storage/s3.py",
+]
 
 [tool.bandit]
 exclude_dirs = ["tests"]

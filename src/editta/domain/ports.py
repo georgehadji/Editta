@@ -1,10 +1,12 @@
-"""Behavioral contracts (ports). Phase 2 adds JobQueue/BlobStore here."""
+"""Behavioral contracts (ports)."""
 
+from collections.abc import AsyncIterator
 from typing import Protocol, TypeVar
+from uuid import UUID
 
 from pydantic import BaseModel
 
-from editta.domain.models import CachePolicy, LLMResult, PromptParts
+from editta.domain.models import CachePolicy, ClaimedJob, LLMResult, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -15,3 +17,20 @@ class LLMClient(Protocol):
     ) -> LLMResult[T]: ...
 
     async def count_tokens(self, parts: PromptParts) -> int: ...
+
+
+class JobQueue(Protocol):
+    async def claim(self, *, worker_id: str, lease_seconds: int) -> ClaimedJob | None: ...
+    async def heartbeat(self, job_id: UUID, worker_id: str, *, lease_seconds: int) -> None: ...
+    async def release(self, job_id: UUID) -> None: ...
+
+
+class BlobStore(Protocol):
+    async def put(self, key: str, data: AsyncIterator[bytes]) -> None: ...
+
+    # Deliberately not `async def`: implementations are async *generator* functions,
+    # so calling get() returns the AsyncIterator directly — no separate await needed.
+    def get(self, key: str) -> AsyncIterator[bytes]: ...
+
+    async def delete_prefix(self, prefix: str) -> None: ...
+    async def presigned_get_url(self, key: str, *, expires_in: int) -> str: ...

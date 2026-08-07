@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -78,6 +79,15 @@ class LLMResult[T: BaseModel](Frozen):
     output: T
     usage: LLMUsage
     model: str
+
+
+class ClaimedJob(Frozen):
+    """A job handed to one worker by JobQueue.claim(), lease-owned until it heartbeats."""
+
+    job_id: UUID
+    tenant_id: UUID
+    manuscript_id: UUID
+    attempt: int
 
 
 class PassResult(Frozen):

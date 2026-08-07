@@ -1,0 +1,56 @@
+"""BlobStore port + S3-compatible adapter. Works for AWS S3, R2, Hetzner, and MinIO
+(dev) — they all speak the same S3 API, only endpoint_url changes.
+"""
+
+from collections.abc import AsyncIterator
+
+import aioboto3
+
+
+class S3BlobStore:
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        endpoint_url: str,
+        access_key: str,
+        secret_key: str,
+        region: str = "auto",
+    ) -> None:
+        self._bucket = bucket
+        self._session = aioboto3.Session()
+        self._client_kwargs = {
+            "endpoint_url": endpoint_url,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+            "region_name": region,
+        }
+
+    async def put(self, key: str, data: AsyncIterator[bytes]) -> None:
+        body = b"".join([chunk async for chunk in data])
+        async with self._session.client("s3", **self._client_kwargs) as client:
+            await client.put_object(
+                Bucket=self._bucket, Key=key, Body=body, ServerSideEncryption="AES256"
+            )
+
+    async def get(self, key: str) -> AsyncIterator[bytes]:
+        async with self._session.client("s3", **self._client_kwargs) as client:
+            response = await client.get_object(Bucket=self._bucket, Key=key)
+            async with response["Body"] as stream:
+                async for chunk in stream.iter_chunks():
+                    yield chunk
+
+    async def delete_prefix(self, prefix: str) -> None:
+        async with self._session.client("s3", **self._client_kwargs) as client:
+            paginator = client.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                if keys:
+                    await client.delete_objects(Bucket=self._bucket, Delete={"Objects": keys})
+
+    async def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
+        async with self._session.client("s3", **self._client_kwargs) as client:
+            url = await client.generate_presigned_url(
+                "get_object", Params={"Bucket": self._bucket, "Key": key}, ExpiresIn=expires_in
+            )
+        return str(url)
