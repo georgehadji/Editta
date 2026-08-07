@@ -18,7 +18,9 @@ class SynthesisPass:
     effort = "high"
     output_schema = SynthesisReport
 
-    def build_prompt(self, manuscript: ManuscriptText, pass_results: list[PassResult]) -> PromptParts:
+    def build_prompt(
+        self, manuscript: ManuscriptText, pass_results: list[PassResult]
+    ) -> PromptParts:
         compact_results = [
             {"pass": r.pass_name, "findings": [f.model_dump(mode="json") for f in r.findings]}
             for r in pass_results

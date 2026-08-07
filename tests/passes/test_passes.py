@@ -1,6 +1,6 @@
 import pytest
 
-from editta.domain.models import Finding, ManuscriptText, PassResult, Severity
+from editta.domain.models import Finding, LLMUsage, ManuscriptText, PassResult, Severity
 from editta.passes.base import SYSTEM_PREAMBLE
 from editta.passes.integrity import IntegrityPass
 from editta.passes.language import LanguagePass
@@ -36,11 +36,9 @@ def test_synthesis_prompt_carries_pass_results_not_new_instructions_from_manuscr
         suggestion="tighten the first sentence",
     )
     pass_result = PassResult(
-        pass_name="language",
+        pass_name="language",  # noqa: S106 -- trips the hardcoded-password heuristic
         findings=[finding],
-        usage=__import__("editta.domain.models", fromlist=["LLMUsage"]).LLMUsage(
-            input_tokens=10, output_tokens=5
-        ),
+        usage=LLMUsage(input_tokens=10, output_tokens=5),
     )
 
     parts = SynthesisPass().build_prompt(MANUSCRIPT, [pass_result])

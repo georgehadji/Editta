@@ -18,7 +18,11 @@ SYSTEM_PREAMBLE = (
 class AnalysisPass(Protocol):
     name: str
     effort: str
-    output_schema: type[BaseModel]
+
+    @property
+    def output_schema(self) -> type[BaseModel]:
+        """Read-only so concrete passes can narrow it to their specific schema subtype."""
+        ...
 
     def build_prompt(self, manuscript: ManuscriptText) -> PromptParts: ...
 

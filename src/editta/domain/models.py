@@ -2,11 +2,8 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
-
-T = TypeVar("T", bound=BaseModel)
 
 
 class Frozen(BaseModel):
@@ -77,7 +74,7 @@ class LLMUsage(Frozen):
     cache_read_tokens: int = 0
 
 
-class LLMResult(Frozen, Generic[T]):
+class LLMResult[T: BaseModel](Frozen):
     output: T
     usage: LLMUsage
     model: str
