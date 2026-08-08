@@ -91,6 +91,9 @@ class FakeAnalysisJobRepo:
     async def get_by_id(self, tenant_id: UUID, job_id: UUID) -> _JobRecord | None:
         return self._records.get((tenant_id, job_id))
 
+    async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[_JobRecord]:
+        return [r for (t, _), r in self._records.items() if t == tenant_id][:limit]
+
     async def update_state(
         self, tenant_id: UUID, job_id: UUID, *, state: JobState, error: str | None = None
     ) -> None:
@@ -179,6 +182,9 @@ class FakeLedgerRepo:
             raise IntegrityError("insert", {}, Exception("duplicate idempotency_key"))
         self._seen_keys.add(idempotency_key)
         self.entries.append({"tenant_id": tenant_id, "delta": delta, "reason": reason})
+
+    async def balance(self, tenant_id: UUID) -> int:
+        return sum(e["delta"] for e in self.entries if e["tenant_id"] == tenant_id)
 
 
 class FakeAuditRepo:

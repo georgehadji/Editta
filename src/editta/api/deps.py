@@ -3,12 +3,17 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
+import stripe
 from fastapi import Cookie, Depends, HTTPException, status
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from editta.adapters.email.console import ConsoleEmailSender
+from editta.adapters.email.smtp import SMTPEmailSender
 from editta.adapters.llm.client import AnthropicLLMClient
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
@@ -23,10 +28,12 @@ from editta.adapters.persistence.repositories import (
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import Settings, load_settings
-from editta.domain.ports import BlobStore, LLMClient
+from editta.domain.ports import BlobStore, EmailSender, LLMClient
 from editta.services.accounts import AccountService, InvalidSession
+from editta.services.billing import BillingService
 
 SESSION_COOKIE_NAME = "editta_session"
+TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
 
 @dataclass(frozen=True)
@@ -144,3 +151,42 @@ def get_audit_repo(
     session: Annotated[AsyncSession, Depends(get_tenant_session)],
 ) -> AuditEventRepository:
     return AuditEventRepository(session)
+
+
+@lru_cache
+def get_templates() -> Jinja2Templates:
+    return Jinja2Templates(directory=TEMPLATES_DIR)
+
+
+@lru_cache
+def get_email_sender() -> EmailSender:
+    settings = get_settings()
+    if settings.smtp_host and settings.smtp_username and settings.smtp_password:
+        return SMTPEmailSender(
+            host=settings.smtp_host,
+            port=settings.smtp_port,
+            username=settings.smtp_username,
+            password=settings.smtp_password,
+            from_address=settings.smtp_from_address,
+        )
+    return ConsoleEmailSender()
+
+
+@lru_cache
+def get_billing_service() -> BillingService:
+    settings = get_settings()
+    secret_key, webhook_secret, price_id = (
+        settings.stripe_secret_key,
+        settings.stripe_webhook_secret,
+        settings.stripe_price_id,
+    )
+    if not secret_key or not webhook_secret or not price_id:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "billing is not configured")
+    return BillingService(
+        client=stripe.StripeClient(secret_key),
+        webhook_secret=webhook_secret,
+        price_id=price_id,
+        credits_per_purchase=settings.credits_per_purchase,
+        success_url=f"{settings.app_base_url}/billing/success",
+        cancel_url=f"{settings.app_base_url}/billing/cancel",
+    )

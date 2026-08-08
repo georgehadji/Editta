@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Check your email — Editta{% endblock %}
+{% block body %}
+  <h1>Check your email</h1>
+  <p>We sent a sign-in link to <strong>{{ email }}</strong>. It expires in 15 minutes.</p>
+  {% if dev_magic_link %}
+    <p><em>Local dev only (no email provider configured):</em>
+      <a href="{{ dev_magic_link }}">{{ dev_magic_link }}</a></p>
+  {% endif %}
+{% endblock %}

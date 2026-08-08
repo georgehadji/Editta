@@ -3,6 +3,7 @@ processor chain configured in api/main.py, not here.
 """
 
 import hmac
+import secrets
 from collections.abc import Awaitable, Callable
 
 from fastapi import Header, HTTPException, Request, Response, status
@@ -11,6 +12,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from editta.api.deps import SESSION_COOKIE_NAME
 
+
+def new_csrf_cookie_value() -> str:
+    return secrets.token_urlsafe(32)
+
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 _SECURITY_HEADERS = {
@@ -18,7 +23,12 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "same-origin",
     "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
-    "Content-Security-Policy": "default-src 'self'",
+    # unpkg.com: htmx is loaded from CDN, not vendored (PLAN.md: "no SPA build chain
+    # until warranted"). 'unsafe-inline' on style only — base.html's <style> block,
+    # never relaxed for script.
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' 'unsafe-inline'"
+    ),
 }
 
 

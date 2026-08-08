@@ -1,0 +1,18 @@
+<table id="job-list" hx-get="/t/{{ tenant_id }}/jobs-fragment" hx-trigger="every 3s" hx-swap="outerHTML">
+  <thead><tr><th>Manuscript</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td>{{ job.manuscript_id }}</td>
+      <td class="state">{{ job.state }}{% if job.error %} — <span class="error-text">{{ job.error }}</span>{% endif %}</td>
+      <td>
+        {% if job.state == "completed" %}
+          <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/download">download report</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3">No manuscripts uploaded yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Editta{% endblock %}
+{% block body %}
+  <h1>Sign in to Editta</h1>
+  <form method="post" action="/t/{{ tenant_id }}/login">
+    <label for="email">Email address</label><br>
+    <input type="email" id="email" name="email" required autofocus>
+    <button type="submit">Send sign-in link</button>
+  </form>
+  {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
+{% endblock %}

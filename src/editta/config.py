@@ -24,6 +24,22 @@ class Settings(BaseSettings):
     job_cost_ceiling_usd: float = Field(default=6.0, gt=0)
     manuscript_retention_days: int = 30
 
+    app_base_url: str = "http://localhost:8000"
+
+    # SMTP is optional: unset means adapters/email/console.py is used (dev-only,
+    # logs the magic link instead of sending it — see api/deps.py).
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_address: str = "noreply@editta.app"
+
+    # Stripe is optional too: billing routes 503 until these are set.
+    stripe_secret_key: str | None = None
+    stripe_webhook_secret: str | None = None
+    stripe_price_id: str | None = None
+    credits_per_purchase: int = 10
+
 
 def load_settings() -> Settings:
     return Settings()

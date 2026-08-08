@@ -101,6 +101,15 @@ class AnalysisJobRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[AnalysisJob]:
+        stmt = (
+            select(AnalysisJob)
+            .where(AnalysisJob.tenant_id == tenant_id)
+            .order_by(AnalysisJob.created_at.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
+
     async def update_state(
         self, tenant_id: UUID, job_id: UUID, *, state: str, error: str | None = None
     ) -> None:

@@ -26,7 +26,7 @@ dependencies = [
   "opentelemetry-sdk>=1.28",
   "opentelemetry-instrumentation-fastapi>=0.49b0",
   "uvloop>=0.21; sys_platform != 'win32'",
-  "stripe>=11.3",
+  "stripe>=15.4",
   "slowapi>=0.1.9",
   "jinja2>=3.1",
   "python-multipart>=0.0.17",
@@ -98,6 +98,7 @@ omit = [
     "src/editta/adapters/persistence/uow.py",
     "src/editta/adapters/queue/postgres.py",
     "src/editta/adapters/storage/s3.py",
+    "src/editta/adapters/email/smtp.py",
 ]
 
 [tool.bandit]

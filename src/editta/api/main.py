@@ -10,7 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from editta.api.middleware import SecurityHeadersMiddleware, limiter
-from editta.api.routes import auth, manuscripts
+from editta.api.routes import auth, billing, manuscripts, web
 
 logger = structlog.get_logger(__name__)
 
@@ -39,3 +39,5 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router)
 app.include_router(manuscripts.router)
+app.include_router(billing.router)
+app.include_router(web.router)

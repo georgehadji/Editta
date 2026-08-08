@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Editta{% endblock %}
+{% block body %}
+  <header>
+    <h1>Editta</h1>
+    <div class="credit-balance">{{ credit_balance }} credits —
+      <a href="/billing/checkout">buy more</a>
+    </div>
+  </header>
+
+  <form class="upload" method="post" action="/t/{{ tenant_id }}/upload"
+        enctype="multipart/form-data"
+        hx-post="/t/{{ tenant_id }}/upload" hx-target="#job-list" hx-swap="outerHTML"
+        hx-encoding="multipart/form-data"
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+    <label for="file">Manuscript (.docx)</label><br>
+    <input type="file" id="file" name="file" accept=".docx" required>
+    <button type="submit">Upload &amp; analyze</button>
+  </form>
+
+  <h2>Reports</h2>
+  {% include "_job_list.html" %}
+{% endblock %}
