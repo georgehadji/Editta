@@ -16,8 +16,7 @@ Cost: the usage of failed-but-billed LLM calls is recorded as they fail
 (`_RecordFailedSpend`); a cut-off answer is not retried.
 
 Credits: reserved at upload (services/uploads.py), refunded only when the job dies.
-The runner's own reservation is an idempotent fallback for jobs queued before upload-
-time reservation existed; for every other job it finds the key and appends nothing.
+The runner never reserves; it only refunds against the reservation the ledger holds.
 
 Fencing: every job-state write is conditional on this run's `lease_owner` still
 holding the job (`set_state_if_owned`). If the lease was lost — the worker stalled
@@ -151,13 +150,11 @@ class JobRunner:
         blobs: BlobStore,
         llm: LLMClient,
         cost_ceiling_usd: float,
-        job_cost_credits: int = 1,
     ) -> None:
         self._uow = uow
         self._blobs = blobs
         self._llm = llm
         self._cost_ceiling_usd = cost_ceiling_usd
-        self._job_cost_credits = job_cost_credits
 
     async def run(self, job: ClaimedJob) -> JobOutcome:
         if attempts_exhausted(job.attempt):
@@ -200,11 +197,6 @@ class JobRunner:
 
     async def _execute(self, job: ClaimedJob) -> None:
         llm = _RecordFailedSpend(self._llm, lambda usage: self._record_usage(job, usage))
-        # Own transaction: the reservation must survive a failure in any later step,
-        # because the failure path refunds against it.
-        async with self._uow() as repos:
-            await self._reserve_credit_once(repos, job)
-
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.PARSING)
             record = await repos.manuscripts.get_by_id(job.tenant_id, job.manuscript_id)
@@ -258,16 +250,6 @@ class JobRunner:
         async with self._uow() as repos:
             await repos.reports.create(job_id=job.job_id, blob_key=report_key)
             await self._set_state(repos, job, JobState.COMPLETED)
-
-    async def _reserve_credit_once(self, repos: JobRepositories, job: ClaimedJob) -> None:
-        # A retry finds the first attempt's reservation and appends nothing.
-        await repos.ledger.append_once(
-            tenant_id=job.tenant_id,
-            delta=-self._job_cost_credits,
-            reason="job",
-            idempotency_key=reservation_key(job.job_id),
-            job_id=job.job_id,
-        )
 
     async def _checkpoint(self, job: ClaimedJob, result: PassResult) -> None:
         blob_key = _pass_checkpoint_key(job.job_id, result.pass_name)

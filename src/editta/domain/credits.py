@@ -18,8 +18,7 @@ def require_credits(balance: int, required: int = DEFAULT_JOB_COST_CREDITS) -> N
 
 def reservation_key(job_id: object) -> str:
     """Idempotency key of a job's credit reservation. Shared by the upload (which
-    reserves) and the job runner (which refunds against it, and reserves only for jobs
-    created before upload-time reservation existed)."""
+    reserves) and the job runner (which refunds against it)."""
     return f"job:{job_id}:reserve"
 
 

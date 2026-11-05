@@ -274,6 +274,14 @@ async def _seed_job(
         job = await AnalysisJobRepository(session).create(
             tenant_id=tenant_id, manuscript_id=manuscript.id
         )
+        # What the upload does: the credit is taken before the job is queued.
+        await CreditLedgerRepository(session).append_once(
+            tenant_id=tenant_id,
+            delta=-1,
+            reason="job",
+            idempotency_key=f"job:{job.id}:reserve",
+            job_id=job.id,
+        )
         await session.commit()
     return tenant_id, manuscript.id, job.id
 
