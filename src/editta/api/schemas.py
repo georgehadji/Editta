@@ -1,5 +1,6 @@
 """Request/response DTOs and the {success, data, error, meta} response envelope."""
 
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
@@ -26,9 +27,21 @@ class MagicLinkRequest(BaseModel):
 
 
 class MagicLinkRequestResponse(BaseModel):
-    # Dev/local convenience only: a real deploy emails this token instead of
-    # returning it (no transactional-email provider is wired yet — see accounts.py).
-    magic_link_token: str
+    """Always the same response, whether or not the email has an account: the link is
+    only ever delivered by email, and the endpoint must not reveal who is a user."""
+
+    accepted: bool = True
+
+
+class InviteRequest(BaseModel):
+    email: EmailStr
+    role: Literal["admin", "editor"] = "editor"
+
+
+class InviteResponse(BaseModel):
+    user_id: UUID
+    email: str
+    role: str
 
 
 class MagicLinkVerifyRequest(BaseModel):

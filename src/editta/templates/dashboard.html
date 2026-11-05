@@ -7,14 +7,19 @@
       <a href="/billing/checkout">buy more</a>
     </div>
   </header>
+  <p class="signed-in">Signed in as <strong>{{ email }}</strong> · workspace <code>{{ tenant_id }}</code>
+    <button hx-post="/t/{{ tenant_id }}/logout"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>Sign out</button></p>
+
+  <div id="upload-error"></div>
 
   <form class="upload" method="post" action="/t/{{ tenant_id }}/upload"
         enctype="multipart/form-data"
         hx-post="/t/{{ tenant_id }}/upload" hx-target="#job-list" hx-swap="outerHTML"
         hx-encoding="multipart/form-data"
         hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
-    <label for="file">Manuscript (.docx)</label><br>
-    <input type="file" id="file" name="file" accept=".docx" required>
+    <label for="file">Manuscript (.docx or .pdf)</label><br>
+    <input type="file" id="file" name="file" accept=".docx,.pdf" required>
     <button type="submit">Upload &amp; analyze</button>
   </form>
 

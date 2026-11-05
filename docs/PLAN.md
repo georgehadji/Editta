@@ -239,18 +239,21 @@ Manuscripts are unpublished intellectual property — confidentiality is the pro
 **Prompt-injection defense (manuscripts are untrusted input):**
 - Manuscript text isolated in a clearly delimited data block; system prompt states it is content to analyze, never instructions.
 - No tools enabled on analysis calls; structured-output schema constrains the response shape.
-- **Quote anchoring:** every finding must include a verbatim quote; the pipeline verifies the quote exists in the source text (fuzzy match ≥ 0.9). Kills both injection-steered and hallucinated findings before they reach an editor. **Synthesis cites findings by id** (`SynthesisPlan.finding_ids`, resolved in `domain/synthesis.py`): its output type cannot carry a finding, so it cannot add, alter or re-quote one — unknown ids are dropped. Its overview/section summaries remain free prose.
+- **Quote anchoring:** every finding must include a verbatim quote that identifies one passage: long quotes (≥ 24 chars) may match fuzzily (≥ 0.9); short ones must match exactly and occur once (a unique typo anchors, a common word does not). Text is NFC- and whitespace-normalized first. Kills both injection-steered and hallucinated findings before they reach an editor. **Synthesis cites findings by id** (`SynthesisPlan.finding_ids`, resolved in `domain/synthesis.py`): its output type cannot carry a finding, so it cannot add, alter or re-quote one — unknown ids are dropped. Its overview/section summaries remain free prose.
 
 **Tenancy & access:**
-- Every repository method takes `tenant_id`; Postgres **Row-Level Security** as defense-in-depth (second, independent enforcement layer).
+- Every repository method takes `tenant_id`; Postgres **Row-Level Security** as defense-in-depth (second, independent enforcement layer). **Forced** on the table owner (migration 0004) — the app role owns the tables, and Postgres otherwise skips RLS for owners. Every app path, including pre-auth user lookups, runs inside a tenant-scoped transaction; a missing tenant context deterministically sees no rows.
 - AuthN: magic-link email login (no passwords to breach) + session cookies (HttpOnly, Secure, SameSite=Lax); CSRF tokens on mutations. API keys (hashed at rest) for the later API tier.
+- **Sign-in links are confirmed, not followed:** opening a link shows which account and workspace it signs into; the POST that signs in needs a nonce cookie set by that page, so neither a forwarded link nor a cross-site form can swap someone's session. Sign-in emails are sent after responding (no timing or delivery-failure signal of which emails have accounts); rate limits key on the signed-in user or the IP, never on a raw cookie.
+- **Invite-only access** (`services/accounts.py`): a link is emailed only to an existing account and never returned in an HTTP response; signing in never creates an account. Tenants and first admins are created by an operator (`editta create-tenant`); admins invite others (`POST /auth/invite`). Sessions are re-checked against the database on every request, so removing a user revokes access. The console email sender exists only with `EDITTA_ENVIRONMENT=development` (the default is production).
 - AuthZ: role check in the service layer, not in controllers.
 
 **Data protection:**
 - TLS everywhere; SSE on object storage; EU-region hosting; DPA with subprocessors.
-- **Retention:** manuscript text auto-deleted after a configurable window (default 30 days) — scheduled job hard-deletes blobs + rows; reports kept until tenant deletes.
+- **Retention:** manuscript content auto-purged after a configurable window (default 30 days) — the source file, every analysis checkpoint (they quote the text) and their rows; the manuscript row is kept, marked `purged`, because jobs and reports reference it. Storage is deleted before the record is marked, so a failure is retried, never left behind (`services/retention.py`). Reports kept until tenant deletes.
 - Manuscript text **never** appears in logs, error messages, or Sentry payloads (scrubbing middleware); LLM calls run under the API's standard no-training terms.
 - Secrets via environment/secret manager only; `config.py` fails fast at startup if any are missing.
+- **Worker database role:** the queue and the retention sweep must connect as the BYPASSRLS `editta_worker` role (`EDITTA_WORKER_DATABASE_URL`); with RLS forced, any other role sees no rows. Both refuse to start otherwise. **Deploy order for migration 0004:** ship the code first, then migrate — older code's unscoped login lookups stop working once RLS is forced.
 
 **Platform:** rate limiting per tenant and per IP (SlowAPI), strict input validation on every endpoint (Pydantic), security headers (CSP, HSTS), dependency scanning (`pip-audit`), SAST (`bandit`), secret scanning (`gitleaks`) in CI, append-only `AuditEvent` for uploads/downloads/deletions/credit changes.
 
@@ -325,7 +328,7 @@ Postgres schema + migrations + RLS, repositories/UoW, job queue + worker with ch
 *Done when: two tenants can concurrently upload → poll → download with full isolation (verified by tests); kill -9 on a worker mid-job loses nothing.*
 
 **Phase 3 — UI + billing (1.5 wk)**
-Jinja2+HTMX: upload page, job list with status, report download, credit balance. Stripe Checkout credit packs; append-only ledger with idempotency keys; reserve-on-start / refund-on-failure.
+Jinja2+HTMX: upload page, job list with status, report download, credit balance. Stripe Checkout credit packs; append-only ledger with idempotency keys; reserve **at upload** (tenant row locked, balance checked, HTTP 402 when short) / refund when the job dies.
 *Done when: a non-technical editor completes upload→pay→report unassisted; Stripe webhooks replay-safe.*
 
 **Phase 4 — Production hardening (1 wk)**

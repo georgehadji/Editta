@@ -23,6 +23,7 @@ class _ManuscriptRecord:
         self.blob_key = blob_key
         self.title = title
         self.retention_until = retention_until
+        self.status = "uploaded"
 
 
 class FakeManuscriptRepo:
@@ -60,12 +61,14 @@ class FakeManuscriptRepo:
 
     async def list_expired(self, before: Any) -> list[_ManuscriptRecord]:
         return [
-            r for r in self._records.values() if r.retention_until and r.retention_until < before
+            r
+            for r in self._records.values()
+            if r.retention_until and r.retention_until < before and r.status != "purged"
         ]
 
-    async def delete(self, manuscript: _ManuscriptRecord) -> None:
-        key = next(k for k, v in self._records.items() if v is manuscript)
-        del self._records[key]
+    async def mark_purged(self, tenant_id: UUID, manuscript_id: UUID) -> None:
+        record = self._records[(tenant_id, manuscript_id)]
+        record.status, record.blob_key = "purged", ""
 
 
 class _JobRecord:
@@ -94,6 +97,13 @@ class FakeAnalysisJobRepo:
 
     async def get_by_id(self, tenant_id: UUID, job_id: UUID) -> _JobRecord | None:
         return self._records.get((tenant_id, job_id))
+
+    async def list_ids_for_manuscript(self, tenant_id: UUID, manuscript_id: UUID) -> list[UUID]:
+        return [
+            r.id
+            for (t, _), r in self._records.items()
+            if t == tenant_id and r.manuscript_id == manuscript_id
+        ]
 
     async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[_JobRecord]:
         return [r for (t, _), r in self._records.items() if t == tenant_id][:limit]
@@ -177,6 +187,9 @@ class FakePassResultRepo:
         self._rows.append(row)
         return row
 
+    async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
+        self._rows = [r for r in self._rows if r.job_id not in job_ids]
+
     async def list_for_job(self, job_id: UUID) -> list[_PassResultRecord]:
         return [r for r in self._rows if r.job_id == job_id]
 
@@ -209,6 +222,7 @@ class FakeLedgerRepo:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
         self._seen_keys: set[str] = set()
+        self._deltas: dict[str, int] = {}
 
     async def append_once(
         self,
@@ -223,11 +237,15 @@ class FakeLedgerRepo:
         if idempotency_key in self._seen_keys:
             return False
         self._seen_keys.add(idempotency_key)
+        self._deltas[idempotency_key] = delta
         self.entries.append({"tenant_id": tenant_id, "delta": delta, "reason": reason})
         return True
 
     async def has_entry(self, idempotency_key: str) -> bool:
         return idempotency_key in self._seen_keys
+
+    async def entry_delta(self, idempotency_key: str) -> int | None:
+        return self._deltas.get(idempotency_key)
 
     async def balance(self, tenant_id: UUID) -> int:
         return sum(e["delta"] for e in self.entries if e["tenant_id"] == tenant_id)
@@ -265,22 +283,80 @@ class FakeBlobStore:
 
 
 class FakeTenantRepo:
+    def __init__(self) -> None:
+        self.locked: list[UUID] = []
+        self.known: set[UUID] | None = None  # None = every tenant id exists
+
     async def create(self, *, name: str) -> Any:
-        return type("Tenant", (), {"id": uuid4(), "name": name})()
+        tenant = type("Tenant", (), {"id": uuid4(), "name": name})()
+        if self.known is not None:
+            self.known.add(tenant.id)
+        return tenant
+
+    async def lock(self, tenant_id: UUID) -> bool:
+        self.locked.append(tenant_id)
+        return self.known is None or tenant_id in self.known
 
 
 class FakeUserRepo:
+    """One repo for all tenants; every method is keyed by tenant_id like the real one."""
+
     def __init__(self) -> None:
         self._by_email: dict[tuple[UUID, str], Any] = {}
 
     async def get_by_email(self, tenant_id: UUID, email: str) -> Any:
         return self._by_email.get((tenant_id, email))
 
+    async def get_by_id(self, tenant_id: UUID, user_id: UUID) -> Any:
+        return next(
+            (u for (t, _), u in self._by_email.items() if t == tenant_id and u.id == user_id),
+            None,
+        )
+
     async def create(self, *, tenant_id: UUID, email: str, role: str = "editor") -> Any:
         attrs = {"id": uuid4(), "tenant_id": tenant_id, "email": email, "role": role}
         user = type("User", (), attrs)()
         self._by_email[(tenant_id, email)] = user
         return user
+
+    def remove(self, tenant_id: UUID, email: str) -> None:
+        del self._by_email[(tenant_id, email)]
+
+
+class RecordingEmailSender:
+    """Captures sign-in emails so tests read the link from the 'inbox', like a user."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_magic_link(self, *, to_email: str, link_url: str) -> None:
+        self.sent.append((to_email, link_url))
+
+    def last_token_for(self, email: str) -> str:
+        link = next(url for to, url in reversed(self.sent) if to == email)
+        return link.split("token=", 1)[1]
+
+
+def make_account_service(
+    users: FakeUserRepo, *, secret: str, tenants: FakeTenantRepo | None = None
+) -> Any:
+    from contextlib import asynccontextmanager
+
+    from editta.services.accounts import AccountService
+
+    @asynccontextmanager
+    async def user_store(tenant_id: UUID) -> AsyncIterator[Any]:
+        yield users
+
+    @asynccontextmanager
+    async def tenant_store() -> AsyncIterator[Any]:
+        yield tenants or FakeTenantRepo()
+
+    return AccountService(
+        users=user_store,  # type: ignore[arg-type]
+        tenants=tenant_store,  # type: ignore[arg-type]
+        session_secret=secret,
+    )
 
 
 class FakeJobUnitOfWork:

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,8 @@ from editta.adapters.persistence.tables import (
 )
 from editta.domain.errors import LeaseLost
 
+MANUSCRIPT_PURGED = "purged"
+
 
 class TenantRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -37,6 +39,20 @@ class TenantRepository:
     async def get_by_id(self, tenant_id: UUID) -> Tenant | None:
         return await self._session.get(Tenant, tenant_id)
 
+    async def lock(self, tenant_id: UUID) -> bool:
+        """Row-lock the tenant until the transaction ends.
+
+        Serializes balance check-and-reserve per tenant: without it, two concurrent
+        uploads could both see a balance of 1 and both reserve. Returns False if the
+        tenant does not exist.
+
+        FOR NO KEY UPDATE, not FOR UPDATE: it still conflicts with itself (so uploads
+        serialize) but not with the FOR KEY SHARE locks that foreign-key checks take —
+        a plain FOR UPDATE made every insert referencing the tenant (Stripe credits,
+        refunds, audit events) wait for the upload holding it."""
+        stmt = select(Tenant.id).where(Tenant.id == tenant_id).with_for_update(key_share=True)
+        return (await self._session.execute(stmt)).first() is not None
+
 
 class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -50,6 +66,10 @@ class UserRepository:
 
     async def get_by_email(self, tenant_id: UUID, email: str) -> User | None:
         stmt = select(User).where(User.tenant_id == tenant_id, User.email == email)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_id(self, tenant_id: UUID, user_id: UUID) -> User | None:
+        stmt = select(User).where(User.tenant_id == tenant_id, User.id == user_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
 
@@ -79,12 +99,20 @@ class ManuscriptRepository:
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_expired(self, before: datetime) -> list[Manuscript]:
-        # Retention sweep is a platform-level job, not tenant-scoped by design.
-        stmt = select(Manuscript).where(Manuscript.retention_until < before)
+        # Retention sweep is a platform-level job, not tenant-scoped by design (it runs
+        # on the BYPASSRLS worker role). Already-purged manuscripts are done.
+        stmt = select(Manuscript).where(
+            Manuscript.retention_until < before, Manuscript.status != MANUSCRIPT_PURGED
+        )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    async def delete(self, manuscript: Manuscript) -> None:
-        await self._session.delete(manuscript)
+    async def mark_purged(self, tenant_id: UUID, manuscript_id: UUID) -> None:
+        """Content is gone; the row stays, because jobs and reports reference it."""
+        await self._session.execute(
+            update(Manuscript)
+            .where(Manuscript.tenant_id == tenant_id, Manuscript.id == manuscript_id)
+            .values(status=MANUSCRIPT_PURGED, blob_key="")
+        )
 
 
 class AnalysisJobRepository:
@@ -102,6 +130,12 @@ class AnalysisJobRepository:
             AnalysisJob.tenant_id == tenant_id, AnalysisJob.id == job_id
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_ids_for_manuscript(self, tenant_id: UUID, manuscript_id: UUID) -> list[UUID]:
+        stmt = select(AnalysisJob.id).where(
+            AnalysisJob.tenant_id == tenant_id, AnalysisJob.manuscript_id == manuscript_id
+        )
+        return list((await self._session.execute(stmt)).scalars().all())
 
     async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[AnalysisJob]:
         stmt = (
@@ -194,6 +228,10 @@ class PassResultRepository:
         await self._session.flush()
         return result
 
+    async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
+        if job_ids:
+            await self._session.execute(delete(PassResult).where(PassResult.job_id.in_(job_ids)))
+
     async def list_for_job(self, job_id: UUID) -> list[PassResult]:
         stmt = select(PassResult).where(PassResult.job_id == job_id)
         return list((await self._session.execute(stmt)).scalars().all())
@@ -264,8 +302,11 @@ class CreditLedgerRepository:
         return result.scalar_one_or_none() is not None
 
     async def has_entry(self, idempotency_key: str) -> bool:
-        stmt = select(CreditLedger.id).where(CreditLedger.idempotency_key == idempotency_key)
-        return (await self._session.execute(stmt)).first() is not None
+        return await self.entry_delta(idempotency_key) is not None
+
+    async def entry_delta(self, idempotency_key: str) -> int | None:
+        stmt = select(CreditLedger.delta).where(CreditLedger.idempotency_key == idempotency_key)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def balance(self, tenant_id: UUID) -> int:
         stmt = select(func.coalesce(func.sum(CreditLedger.delta), 0)).where(

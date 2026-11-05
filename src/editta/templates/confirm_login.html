@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Confirm sign-in — Editta{% endblock %}
+{% block body %}
+  <h1>Confirm sign-in</h1>
+  <p>Sign in as <strong>{{ email }}</strong> to workspace <code>{{ tenant_id }}</code>?</p>
+  <p>If you didn't request this link, or this isn't your email address, close this page.</p>
+  <form method="post" action="/t/{{ tenant_id }}/auth/click">
+    <input type="hidden" name="token" value="{{ token }}">
+    <input type="hidden" name="nonce" value="{{ nonce }}">
+    <button type="submit">Sign in as {{ email }}</button>
+  </form>
+{% endblock %}

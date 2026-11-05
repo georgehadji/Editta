@@ -18,10 +18,13 @@ class Settings(BaseSettings):
     s3_secret_key: str
     session_secret: str
 
-    environment: str = "development"
+    # Secure by default: development-only conveniences (console email sender, sign-in
+    # links shown on the page) require opting in with EDITTA_ENVIRONMENT=development.
+    environment: str = "production"
     max_jobs_per_worker: int = 2
     max_llm_concurrency: int = 4
     job_cost_ceiling_usd: float = Field(default=6.0, gt=0)
+    job_cost_credits: int = Field(default=1, ge=1)
     manuscript_retention_days: int = 30
 
     app_base_url: str = "http://localhost:8000"

@@ -338,3 +338,17 @@ async def test_synthesis_is_checkpointed_so_an_export_failure_does_not_rebill_it
     assert first.kind is JobOutcomeKind.RETRY
     assert second.kind is JobOutcomeKind.COMPLETED
     assert len(h.llm.calls) == calls_after_first  # neither passes nor synthesis re-run
+
+
+@pytest.mark.asyncio
+async def test_refund_returns_the_reserved_amount_not_todays_price() -> None:
+    h = Harness()
+    await h.uow.ledger.append_once(
+        tenant_id=h.tenant_id, delta=-2, reason="job", idempotency_key=f"job:{h.job_id}:reserve"
+    )
+    h.blobs.seed("raw/essay", b"PK\x03\x04 not a zip")  # dies deterministically
+
+    outcome = await h.runner.run(h.claimed())  # runner configured at 1 credit/job
+
+    assert outcome.kind is JobOutcomeKind.DEAD
+    assert h.ledger("refund") == [2]
