@@ -10,8 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy.exc import IntegrityError
-
+from editta.domain.errors import LeaseLost
 from editta.domain.states import JobState
 
 
@@ -76,6 +75,11 @@ class _JobRecord:
         self.manuscript_id = manuscript_id
         self.state = JobState.PENDING
         self.error: str | None = None
+        self.attempt = 0
+        self.lease_owner: str | None = None
+        self.cost_input_tokens = 0
+        self.cost_output_tokens = 0
+        self.cache_read_tokens = 0
 
 
 class FakeAnalysisJobRepo:
@@ -101,6 +105,45 @@ class FakeAnalysisJobRepo:
         record = self._records.get((tenant_id, job_id))
         if record is not None:
             record.state, record.error = state, error
+
+    def seed(
+        self, tenant_id: UUID, job_id: UUID, manuscript_id: UUID, *, lease_owner: str | None
+    ) -> _JobRecord:
+        record = _JobRecord(tenant_id, manuscript_id)
+        record.id = job_id
+        record.lease_owner = lease_owner
+        self._records[(tenant_id, job_id)] = record
+        return record
+
+    async def set_state_if_owned(
+        self,
+        tenant_id: UUID,
+        job_id: UUID,
+        *,
+        lease_owner: str,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        record = self._records.get((tenant_id, job_id))
+        if record is None or record.lease_owner != lease_owner:
+            raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
+        self.state_history.append((JobState(state), error))
+        record.state, record.error = JobState(state), error
+
+    async def record_usage(
+        self,
+        tenant_id: UUID,
+        job_id: UUID,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int,
+    ) -> None:
+        record = self._records.get((tenant_id, job_id))
+        if record is not None:
+            record.cost_input_tokens += input_tokens
+            record.cost_output_tokens += output_tokens
+            record.cache_read_tokens += cache_read_tokens
 
 
 class _PassResultRecord:
@@ -153,11 +196,10 @@ class FakeReportRepo:
 
     async def create(
         self, *, job_id: UUID, blob_key: str, summary_blob_key: str | None = None
-    ) -> _ReportRecord:
-        record = _ReportRecord(job_id, blob_key, summary_blob_key)
-        self._records[job_id] = record
+    ) -> None:
+        # Mirrors the real repo's upsert-on-job_id: never more than one row per job.
+        self._records[job_id] = _ReportRecord(job_id, blob_key, summary_blob_key)
         self.created.append({"job_id": job_id, "blob_key": blob_key})
-        return record
 
     async def get_by_job_id(self, job_id: UUID) -> _ReportRecord | None:
         return self._records.get(job_id)
@@ -168,7 +210,7 @@ class FakeLedgerRepo:
         self.entries: list[dict[str, Any]] = []
         self._seen_keys: set[str] = set()
 
-    async def append(
+    async def append_once(
         self,
         *,
         tenant_id: UUID,
@@ -177,11 +219,15 @@ class FakeLedgerRepo:
         idempotency_key: str,
         job_id: UUID | None = None,
         stripe_ref: str | None = None,
-    ) -> None:
+    ) -> bool:
         if idempotency_key in self._seen_keys:
-            raise IntegrityError("insert", {}, Exception("duplicate idempotency_key"))
+            return False
         self._seen_keys.add(idempotency_key)
         self.entries.append({"tenant_id": tenant_id, "delta": delta, "reason": reason})
+        return True
+
+    async def has_entry(self, idempotency_key: str) -> bool:
+        return idempotency_key in self._seen_keys
 
     async def balance(self, tenant_id: UUID) -> int:
         return sum(e["delta"] for e in self.entries if e["tenant_id"] == tenant_id)
@@ -235,3 +281,50 @@ class FakeUserRepo:
         user = type("User", (), attrs)()
         self._by_email[(tenant_id, email)] = user
         return user
+
+
+class FakeJobUnitOfWork:
+    """Transactional fake for services.jobs.JobUnitOfWork.
+
+    Like a real Postgres transaction: writes made inside a unit that raises are rolled
+    back (repository state is snapshotted on entry and restored on error). This is what
+    makes "checkpoints survive a failed attempt" testable without a database.
+    """
+
+    def __init__(self) -> None:
+        from editta.services.jobs import JobRepositories
+
+        self.jobs = FakeAnalysisJobRepo()
+        self.manuscripts = FakeManuscriptRepo()
+        self.pass_results = FakePassResultRepo()
+        self.reports = FakeReportRepo()
+        self.ledger = FakeLedgerRepo()
+        self._repos = JobRepositories(
+            jobs=self.jobs,  # type: ignore[arg-type]
+            manuscripts=self.manuscripts,  # type: ignore[arg-type]
+            pass_results=self.pass_results,  # type: ignore[arg-type]
+            reports=self.reports,  # type: ignore[arg-type]
+            ledger=self.ledger,  # type: ignore[arg-type]
+        )
+        self.commits = 0
+        self.rollbacks = 0
+
+    def __call__(self) -> Any:
+        import copy
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def unit() -> AsyncIterator[Any]:
+            repos = (self.jobs, self.manuscripts, self.pass_results, self.reports, self.ledger)
+            snapshot = [copy.deepcopy(r.__dict__) for r in repos]
+            try:
+                yield self._repos
+            except BaseException:
+                for repo, state in zip(repos, snapshot, strict=True):
+                    repo.__dict__.clear()
+                    repo.__dict__.update(state)
+                self.rollbacks += 1
+                raise
+            self.commits += 1
+
+        return unit()

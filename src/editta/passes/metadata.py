@@ -6,7 +6,6 @@ from editta.passes.base import BaseAnalysisPass
 
 class MetadataPass(BaseAnalysisPass):
     name = "metadata"
-    effort = "medium"
     output_schema = PassFindings
 
     def instructions(self) -> str:

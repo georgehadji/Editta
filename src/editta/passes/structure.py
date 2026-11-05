@@ -6,7 +6,6 @@ from editta.passes.base import BaseAnalysisPass
 
 class StructurePass(BaseAnalysisPass):
     name = "structure"
-    effort = "high"
     output_schema = PassFindings
 
     def instructions(self) -> str:

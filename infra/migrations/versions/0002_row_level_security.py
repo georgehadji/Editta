@@ -40,13 +40,14 @@ def upgrade() -> None:
 
     for table in _JOB_SCOPED_TABLES:
         op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        # `table` comes from the constant tuple above, never from input.
         op.execute(f"""
             CREATE POLICY tenant_isolation ON {table}
             USING (job_id IN (
                 SELECT id FROM analysis_jobs
                 WHERE tenant_id = current_setting('app.current_tenant_id', true)::uuid
             ))
-        """)
+        """)  # noqa: S608
 
 
 def downgrade() -> None:

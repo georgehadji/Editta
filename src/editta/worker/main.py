@@ -2,15 +2,20 @@
 
 Claim/heartbeat/release use a plain (non tenant-scoped) session against
 WORKER_DATABASE_URL — see infra/migrations 0002-0003 for why that connection needs
-a BYPASSRLS role. Running the job itself uses UnitOfWork.begin(tenant_id), so the
-actual pipeline I/O stays RLS-scoped like any other tenant-scoped code path.
+a BYPASSRLS role. Running the job itself uses UnitOfWork.begin(tenant_id) — one short
+transaction per pipeline step (see services/jobs.py) — so pipeline I/O stays
+RLS-scoped like any other tenant-scoped code path.
+
+This module is the composition root: it wires adapters into JobRunner and maps the
+runner's JobOutcome onto queue actions. The runner never touches the queue.
 """
 
 import asyncio
 import signal
 import socket
 import uuid
-from contextlib import suppress
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -27,14 +32,31 @@ from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import DEFAULT_LEASE_SECONDS, PostgresJobQueue
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import Settings, load_settings, worker_database_url
-from editta.domain.errors import EdittaError
-from editta.domain.models import ClaimedJob
-from editta.services.jobs import JobRunner
+from editta.domain.models import ClaimedJob, JobOutcomeKind
+from editta.services.jobs import JobRepositories, JobRunner, JobUnitOfWork
 
 logger = structlog.get_logger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = DEFAULT_LEASE_SECONDS // 3
 POLL_INTERVAL_SECONDS = 2.0
+
+
+def job_unit_of_work(uow: UnitOfWork, tenant_id: uuid.UUID) -> JobUnitOfWork:
+    """Adapt the SQLAlchemy UnitOfWork to the JobRunner's port: each call opens one
+    tenant-scoped (RLS) transaction with the job repositories bound to it."""
+
+    @asynccontextmanager
+    async def unit() -> AsyncIterator[JobRepositories]:
+        async with uow.begin(tenant_id) as session:
+            yield JobRepositories(
+                jobs=AnalysisJobRepository(session),
+                manuscripts=ManuscriptRepository(session),
+                pass_results=PassResultRepository(session),
+                reports=ReportRepository(session),
+                ledger=CreditLedgerRepository(session),
+            )
+
+    return unit
 
 
 class Worker:
@@ -58,6 +80,7 @@ class Worker:
         self._llm = AnthropicLLMClient(
             settings.anthropic_api_key, max_concurrency=settings.max_llm_concurrency
         )
+        self._cost_ceiling_usd = settings.job_cost_ceiling_usd
         self._shutdown = asyncio.Event()
 
     def request_shutdown(self) -> None:
@@ -80,38 +103,66 @@ class Worker:
             return await PostgresJobQueue(session).claim(worker_id=self._worker_id)
 
     async def _process(self, claimed: ClaimedJob) -> None:
+        log = logger.bind(job_id=str(claimed.job_id), worker_id=self._worker_id)
+        runner = JobRunner(
+            uow=job_unit_of_work(self._uow, claimed.tenant_id),
+            blobs=self._blobs,
+            llm=self._llm,
+            cost_ceiling_usd=self._cost_ceiling_usd,
+        )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(claimed.job_id))
         try:
-            async with self._uow.begin(claimed.tenant_id) as session:
-                runner = JobRunner(
-                    jobs=AnalysisJobRepository(session),
-                    manuscripts=ManuscriptRepository(session),
-                    pass_results=PassResultRepository(session),
-                    reports=ReportRepository(session),
-                    ledger=CreditLedgerRepository(session),
-                    blobs=self._blobs,
-                    llm=self._llm,
-                )
-                await runner.run(
-                    tenant_id=claimed.tenant_id,
-                    job_id=claimed.job_id,
-                    manuscript_id=claimed.manuscript_id,
-                )
-            logger.info("worker.job_completed", job_id=str(claimed.job_id))
-        except EdittaError as exc:
-            logger.warning("worker.job_failed", job_id=str(claimed.job_id), error=str(exc))
+            outcome = await runner.run(claimed)
+        except Exception:
+            # The runner records every job failure itself; reaching here means that
+            # recording failed too (e.g. the database is down). Keep the lease: it
+            # expires on its own and the job is reclaimed then — an implicit backoff,
+            # bounded because every claim counts an attempt — and the worker loop
+            # survives instead of crashing on one bad job.
+            log.exception("worker.job_unrecorded_failure")
+            return
         finally:
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
+
+        if outcome.kind is JobOutcomeKind.ABANDONED:
+            # Another worker owns the job now; releasing or deferring is theirs to do
+            # (and the fenced queue calls would be no-ops anyway).
+            log.warning("worker.job_abandoned", error=outcome.error)
+            return
+        try:
             async with self._queue_sessions() as session:
-                await PostgresJobQueue(session).release(claimed.job_id)
+                queue = PostgresJobQueue(session)
+                if outcome.kind is JobOutcomeKind.RETRY and outcome.retry_after_seconds:
+                    await queue.defer(
+                        claimed.job_id, self._worker_id, delay_seconds=outcome.retry_after_seconds
+                    )
+                else:
+                    await queue.release(claimed.job_id, self._worker_id)
+        except Exception:
+            # Outcome is already recorded; only the lease hand-back failed. It expires
+            # on its own, and a terminal job is never claimed again.
+            log.exception("worker.lease_handback_failed", outcome=outcome.kind.value)
+            return
+        log.info(
+            "worker.job_finished",
+            outcome=outcome.kind.value,
+            error=outcome.error,
+            retry_after_seconds=outcome.retry_after_seconds,
+        )
 
     async def _heartbeat_loop(self, job_id: uuid.UUID) -> None:
+        """Extends the lease until cancelled. Never dies on a transient error: a dead
+        heartbeat task would silently let the lease lapse, and re-raise from the
+        `await` in `_process`'s finally — crashing the worker loop."""
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-            async with self._queue_sessions() as session:
-                await PostgresJobQueue(session).heartbeat(job_id, self._worker_id)
+            try:
+                async with self._queue_sessions() as session:
+                    await PostgresJobQueue(session).heartbeat(job_id, self._worker_id)
+            except Exception:
+                logger.exception("worker.heartbeat_failed", job_id=str(job_id))
 
 
 async def _run(settings: Settings) -> None:

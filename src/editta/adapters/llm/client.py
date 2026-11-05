@@ -7,27 +7,58 @@
 """
 
 import asyncio
-from typing import Any, TypeVar
+from typing import Final, Literal, TypeVar, cast, get_args
 
-from anthropic import AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic
+from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
 from pydantic import BaseModel
 
 from editta.adapters.llm.resilience import CircuitBreaker, TokenBucket
-from editta.domain.errors import LLMError
+from editta.domain.errors import LLMError, LLMRequestRejected
 from editta.domain.models import CachePolicy, LLMResult, LLMUsage, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
 
-MODEL = "claude-opus-5"
-MAX_OUTPUT_TOKENS = 8192
+MODEL: Final = "claude-opus-5"
+# Must cover adaptive thinking at high effort *plus* the structured findings JSON; at
+# 8192 a long thinking phase could truncate the JSON and fail the parse. Kept under
+# the SDK's non-streaming ceiling (~21k tokens, beyond which it requires streaming).
+MAX_OUTPUT_TOKENS: Final = 16_000
+
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+_EFFORTS: Final = frozenset(get_args(Effort))
 
 
-def build_user_content(parts: PromptParts, cache: CachePolicy) -> list[dict[str, Any]]:
-    """Manuscript body gets its own content block so cache_control applies to it alone."""
-    manuscript_block: dict[str, Any] = {"type": "text", "text": parts.manuscript_block}
+def build_user_content(parts: PromptParts, cache: CachePolicy) -> list[TextBlockParam]:
+    """Manuscript body gets its own content block so cache_control applies to it alone.
+
+    WRITE and READ are identical on the wire — the API decides hit or miss from the
+    prefix; the policy only records the caller's intent (and drives tests/metrics).
+    """
+    manuscript_block: TextBlockParam = {"type": "text", "text": parts.manuscript_block}
     if cache is not CachePolicy.NONE:
         manuscript_block["cache_control"] = {"type": "ephemeral"}
     return [manuscript_block, {"type": "text", "text": parts.instructions}]
+
+
+def _messages(parts: PromptParts, cache: CachePolicy) -> list[MessageParam]:
+    return [{"role": "user", "content": build_user_content(parts, cache)}]
+
+
+# Request-level rejections: the same request will fail the same way on retry, and they
+# say nothing about provider health, so they neither retry nor trip the breaker.
+# (408 timeout, 409, 429 rate limit and 5xx/529 overload stay retryable.)
+_NON_RETRYABLE_STATUSES: Final = frozenset({400, 401, 403, 404, 413, 422})
+
+
+def _output_config(effort: str) -> OutputConfigParam:
+    if effort not in _EFFORTS:
+        raise LLMRequestRejected(f"unsupported effort level: {effort!r}")
+    return {"effort": cast(Effort, effort)}
+
+
+def _is_rejection(exc: Exception) -> bool:
+    return isinstance(exc, APIStatusError) and exc.status_code in _NON_RETRYABLE_STATUSES
 
 
 class AnthropicLLMClient:
@@ -44,37 +75,46 @@ class AnthropicLLMClient:
         )
 
     async def count_tokens(self, parts: PromptParts) -> int:
-        # SDK content-block TypedDicts are stricter than the plain dicts the API itself
-        # accepts at runtime; ignore is scoped to that mismatch, not the call semantics.
-        content = build_user_content(parts, CachePolicy.NONE)
-        response = await self._client.messages.count_tokens(
-            model=MODEL,
-            system=parts.system,
-            messages=[{"role": "user", "content": content}],  # type: ignore[typeddict-item]
-        )
+        try:
+            response = await self._client.messages.count_tokens(
+                model=MODEL, system=parts.system, messages=_messages(parts, CachePolicy.NONE)
+            )
+        except Exception as exc:
+            if _is_rejection(exc):
+                raise LLMRequestRejected(f"token count rejected: {exc}") from exc
+            raise LLMError(f"token count failed: {exc}") from exc
         return int(response.input_tokens)
 
     async def analyze(
         self, parts: PromptParts, schema: type[T], *, cache: CachePolicy, effort: str
     ) -> LLMResult[T]:
+        output_config = _output_config(effort)
         self._breaker.before_call()
         async with self._semaphore:
             await self._bucket.acquire()
-            content = build_user_content(parts, cache)
             try:
                 message = await self._client.messages.parse(
                     model=MODEL,
                     max_tokens=MAX_OUTPUT_TOKENS,
                     system=parts.system,
-                    messages=[{"role": "user", "content": content}],  # type: ignore[typeddict-item]
+                    messages=_messages(parts, cache),
+                    # Fixed for every call: the thinking config is part of the cache key
+                    # (see passes/base.py), so it must never vary between passes.
+                    # For the same reason passes must share one `output_format`.
                     thinking={"type": "adaptive"},
-                    output_config={"effort": effort},  # type: ignore[arg-type]
+                    output_config=output_config,
                     output_format=schema,
                 )
             except Exception as exc:
+                if _is_rejection(exc):
+                    raise LLMRequestRejected(f"LLM request rejected: {exc}") from exc
                 self._breaker.record_failure()
                 raise LLMError(f"LLM call failed: {exc}") from exc
         self._breaker.record_success()
+        if message.parsed_output is None:
+            # A refusal or a max_tokens cut-off yields no parseable output. Retryable:
+            # adaptive thinking length varies between attempts.
+            raise LLMError(f"model returned no structured output (stop: {message.stop_reason})")
         usage = message.usage
         return LLMResult(
             output=message.parsed_output,

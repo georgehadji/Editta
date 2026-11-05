@@ -24,7 +24,9 @@ class _FakeStripeClient:
         self, event: dict[str, object] | None = None, *, raise_invalid: bool = False
     ) -> None:
         self.v1 = SimpleNamespace(
-            checkout=SimpleNamespace(sessions=_FakeCheckoutSessions("https://checkout.stripe.test/abc"))
+            checkout=SimpleNamespace(
+                sessions=_FakeCheckoutSessions("https://checkout.stripe.test/abc")
+            )
         )
         self._event = event
         self._raise_invalid = raise_invalid

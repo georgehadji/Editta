@@ -32,7 +32,12 @@ jobs:
         run: bandit -r src -c pyproject.toml
 
       - name: pip-audit
-        run: pip-audit --strict
+        # Audit the installed third-party dependencies, not the project itself:
+        # `editta` is installed editable and is not on PyPI, so a plain
+        # `pip-audit --strict` always failed with "Dependency not found on PyPI".
+        run: |
+          pip freeze --exclude-editable > "$RUNNER_TEMP/audit-requirements.txt"
+          pip-audit --strict --no-deps --disable-pip -r "$RUNNER_TEMP/audit-requirements.txt"
 
   secret-scan:
     runs-on: ubuntu-latest

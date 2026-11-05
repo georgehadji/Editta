@@ -13,6 +13,11 @@ _HEADING_PREFIX = "Heading"
 
 def parse_docx(data: bytes, filename: str) -> ManuscriptText:
     validate_upload(data, filename)
+    return extract_docx(data, filename)
+
+
+def extract_docx(data: bytes, filename: str) -> ManuscriptText:
+    """Extraction only. Callers must have run validate_upload (parse_docx does)."""
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:

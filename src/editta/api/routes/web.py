@@ -3,9 +3,6 @@ because there's no cross-tenant "log in by email alone" resolution built yet —
 tenant admin shares this tenant-specific login URL with their editors directly.
 """
 
-import hashlib
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
@@ -14,7 +11,6 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from editta.adapters.email.console import ConsoleEmailSender
-from editta.adapters.parsing.safety import validate_upload
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     AuditEventRepository,
@@ -46,12 +42,9 @@ from editta.services.accounts import (
     AccountService,
     InvalidMagicLink,
 )
+from editta.services.uploads import submit_manuscript
 
 router = APIRouter(dependencies=[Depends(verify_csrf)])
-
-
-async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
-    yield data
 
 
 def _require_matching_tenant(auth: AuthContext, tenant_id: UUID) -> None:
@@ -107,9 +100,7 @@ async def verify_login_link(
         tenant_id=tenant_id, user_id=user.id, email=email
     )
 
-    response = RedirectResponse(
-        f"/t/{tenant_id}/dashboard", status_code=status.HTTP_303_SEE_OTHER
-    )
+    response = RedirectResponse(f"/t/{tenant_id}/dashboard", status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE_NAME,
         session_token,
@@ -183,27 +174,20 @@ async def upload_via_web(
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
 
-    data = await file.read()
-    filename = file.filename or "manuscript.docx"
     try:
-        validate_upload(data, filename)
+        await submit_manuscript(
+            tenant_id=tenant_id,
+            actor=auth.email,
+            data=await file.read(),
+            filename=file.filename,
+            manuscripts=manuscripts,
+            jobs=jobs,
+            audit=audit,
+            blobs=blobs,
+            retention_days=settings.manuscript_retention_days,
+        )
     except ParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-
-    sha256 = hashlib.sha256(data).hexdigest()
-    retention_until = datetime.now(UTC) + timedelta(days=settings.manuscript_retention_days)
-    manuscript = await manuscripts.create(
-        tenant_id=tenant_id,
-        title=filename,
-        blob_key=f"{tenant_id}/manuscripts/{sha256}/{filename}",
-        sha256=sha256,
-        retention_until=retention_until,
-    )
-    await blobs.put(manuscript.blob_key, _single_chunk(data))
-    await jobs.create(tenant_id=tenant_id, manuscript_id=manuscript.id)
-    await audit.append(
-        tenant_id=tenant_id, actor=auth.email, action="upload", subject=str(manuscript.id)
-    )
 
     job_list = await jobs.list_for_tenant(tenant_id)
     return templates.TemplateResponse(
