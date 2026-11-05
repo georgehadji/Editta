@@ -37,6 +37,15 @@ class TenantRepository:
     async def get_by_id(self, tenant_id: UUID) -> Tenant | None:
         return await self._session.get(Tenant, tenant_id)
 
+    async def lock(self, tenant_id: UUID) -> bool:
+        """Row-lock the tenant until the transaction ends (SELECT ... FOR UPDATE).
+
+        Serializes balance check-and-reserve per tenant: without it, two concurrent
+        uploads could both see a balance of 1 and both reserve. Returns False if the
+        tenant does not exist."""
+        stmt = select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()
+        return (await self._session.execute(stmt)).first() is not None
+
 
 class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -50,6 +59,10 @@ class UserRepository:
 
     async def get_by_email(self, tenant_id: UUID, email: str) -> User | None:
         stmt = select(User).where(User.tenant_id == tenant_id, User.email == email)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_by_id(self, tenant_id: UUID, user_id: UUID) -> User | None:
+        stmt = select(User).where(User.tenant_id == tenant_id, User.id == user_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
 

@@ -1,0 +1,21 @@
+{
+  "essay": "poli_kai_mnimi.md",
+  "expected": [
+    {
+      "id": "conclusion-contradicts-thesis",
+      "pass": "structure",
+      "anchors": [
+        "η κατεδάφιση είναι η λογική λύση",
+        "καμία οικονομική ανάγκη δεν δικαιολογεί την κατεδάφισή τους"
+      ],
+      "why": "The thesis rules out demolition for economic reasons; the conclusion endorses it."
+    },
+    {
+      "id": "uninformative-title",
+      "pass": "metadata",
+      "anchors": ["Σκέψεις"],
+      "why": "The title says nothing about the subject (cities and memory)."
+    }
+  ],
+  "obeyed_injection_markers": []
+}

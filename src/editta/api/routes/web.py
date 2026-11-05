@@ -17,6 +17,7 @@ from editta.adapters.persistence.repositories import (
     CreditLedgerRepository,
     ManuscriptRepository,
     ReportRepository,
+    TenantRepository,
 )
 from editta.api.deps import (
     SESSION_COOKIE_NAME,
@@ -32,10 +33,11 @@ from editta.api.deps import (
     get_report_repo,
     get_settings,
     get_templates,
+    get_tenant_repo,
 )
 from editta.api.middleware import new_csrf_cookie_value, verify_csrf
 from editta.config import Settings
-from editta.domain.errors import ParseError
+from editta.domain.errors import InsufficientCredits, ParseError
 from editta.domain.ports import BlobStore, EmailSender
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
@@ -71,12 +73,17 @@ async def request_login_link(
     settings: Annotated[Settings, Depends(get_settings)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
-    await account_service.invite_user(tenant_id, email)
-    token = account_service.issue_magic_link_token(tenant_id=tenant_id, email=email)
-    link_url = f"{settings.app_base_url}/t/{tenant_id}/auth/click?token={token}"
-    await email_sender.send_magic_link(to_email=email, link_url=link_url)
-
-    dev_link = link_url if isinstance(email_sender, ConsoleEmailSender) else None
+    # Invite-only: a link is emailed only if this email already has an account here,
+    # and the page reads the same either way (no account enumeration).
+    link_url = await account_service.request_login(
+        tenant_id=tenant_id, email=email, sender=email_sender, base_url=settings.app_base_url
+    )
+    # Local development only: show the link instead of making you read the console.
+    # Never in any other environment — a displayed link bypasses proof of the inbox.
+    show_dev_link = settings.environment == "development" and isinstance(
+        email_sender, ConsoleEmailSender
+    )
+    dev_link = link_url if show_dev_link else None
     return templates.TemplateResponse(
         request, "check_email.html", {"email": email, "dev_magic_link": dev_link}
     )
@@ -89,15 +96,12 @@ async def verify_login_link(
     account_service: Annotated[AccountService, Depends(get_account_service)],
 ) -> RedirectResponse:
     try:
-        verified_tenant_id, email = account_service.verify_magic_link_token(token)
+        user = await account_service.complete_login(token, expected_tenant_id=tenant_id)
     except InvalidMagicLink as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
-    if verified_tenant_id != tenant_id:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token does not match tenant")
 
-    user = await account_service.invite_user(tenant_id, email)
     session_token = account_service.issue_session_cookie(
-        tenant_id=tenant_id, user_id=user.id, email=email
+        tenant_id=tenant_id, user_id=user.user_id, email=user.email
     )
 
     response = RedirectResponse(f"/t/{tenant_id}/dashboard", status_code=status.HTTP_303_SEE_OTHER)
@@ -168,6 +172,8 @@ async def upload_via_web(
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
+    tenants: Annotated[TenantRepository, Depends(get_tenant_repo)],
+    ledger: Annotated[CreditLedgerRepository, Depends(get_ledger_repo)],
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
     settings: Annotated[Settings, Depends(get_settings)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
@@ -183,11 +189,16 @@ async def upload_via_web(
             manuscripts=manuscripts,
             jobs=jobs,
             audit=audit,
+            tenants=tenants,
+            ledger=ledger,
             blobs=blobs,
             retention_days=settings.manuscript_retention_days,
+            job_cost_credits=settings.job_cost_credits,
         )
     except ParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
 
     job_list = await jobs.list_for_tenant(tenant_id)
     return templates.TemplateResponse(

@@ -57,3 +57,17 @@ class ManuscriptTooLong(BudgetExceeded):
         self.ceiling_usd = float("nan")
         self.token_count = token_count
         self.max_tokens = max_tokens
+
+
+class InsufficientCredits(EdittaError):
+    """The tenant cannot pay for another job. Raised at upload, before anything is
+    stored or queued."""
+
+    def __init__(self, balance: int, required: int) -> None:
+        super().__init__(f"not enough credits: {balance} available, {required} required")
+        self.balance = balance
+        self.required = required
+
+
+class PermissionDenied(EdittaError):
+    """The authenticated user's role does not allow this action."""

@@ -265,22 +265,80 @@ class FakeBlobStore:
 
 
 class FakeTenantRepo:
+    def __init__(self) -> None:
+        self.locked: list[UUID] = []
+        self.known: set[UUID] | None = None  # None = every tenant id exists
+
     async def create(self, *, name: str) -> Any:
-        return type("Tenant", (), {"id": uuid4(), "name": name})()
+        tenant = type("Tenant", (), {"id": uuid4(), "name": name})()
+        if self.known is not None:
+            self.known.add(tenant.id)
+        return tenant
+
+    async def lock(self, tenant_id: UUID) -> bool:
+        self.locked.append(tenant_id)
+        return self.known is None or tenant_id in self.known
 
 
 class FakeUserRepo:
+    """One repo for all tenants; every method is keyed by tenant_id like the real one."""
+
     def __init__(self) -> None:
         self._by_email: dict[tuple[UUID, str], Any] = {}
 
     async def get_by_email(self, tenant_id: UUID, email: str) -> Any:
         return self._by_email.get((tenant_id, email))
 
+    async def get_by_id(self, tenant_id: UUID, user_id: UUID) -> Any:
+        return next(
+            (u for (t, _), u in self._by_email.items() if t == tenant_id and u.id == user_id),
+            None,
+        )
+
     async def create(self, *, tenant_id: UUID, email: str, role: str = "editor") -> Any:
         attrs = {"id": uuid4(), "tenant_id": tenant_id, "email": email, "role": role}
         user = type("User", (), attrs)()
         self._by_email[(tenant_id, email)] = user
         return user
+
+    def remove(self, tenant_id: UUID, email: str) -> None:
+        del self._by_email[(tenant_id, email)]
+
+
+class RecordingEmailSender:
+    """Captures sign-in emails so tests read the link from the 'inbox', like a user."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_magic_link(self, *, to_email: str, link_url: str) -> None:
+        self.sent.append((to_email, link_url))
+
+    def last_token_for(self, email: str) -> str:
+        link = next(url for to, url in reversed(self.sent) if to == email)
+        return link.split("token=", 1)[1]
+
+
+def make_account_service(
+    users: FakeUserRepo, *, secret: str, tenants: FakeTenantRepo | None = None
+) -> Any:
+    from contextlib import asynccontextmanager
+
+    from editta.services.accounts import AccountService
+
+    @asynccontextmanager
+    async def user_store(tenant_id: UUID) -> AsyncIterator[Any]:
+        yield users
+
+    @asynccontextmanager
+    async def tenant_store() -> AsyncIterator[Any]:
+        yield tenants or FakeTenantRepo()
+
+    return AccountService(
+        users=user_store,  # type: ignore[arg-type]
+        tenants=tenant_store,  # type: ignore[arg-type]
+        session_secret=secret,
+    )
 
 
 class FakeJobUnitOfWork:

@@ -4,13 +4,16 @@ from uuid import uuid4
 import docx
 import pytest
 
-from editta.domain.errors import ParseError
+from editta.domain.credits import reservation_key
+from editta.domain.errors import InsufficientCredits, ParseError
 from editta.services.uploads import submit_manuscript
 from tests.services.fakes import (
     FakeAnalysisJobRepo,
     FakeAuditRepo,
     FakeBlobStore,
+    FakeLedgerRepo,
     FakeManuscriptRepo,
+    FakeTenantRepo,
 )
 
 
@@ -23,11 +26,14 @@ def _docx() -> bytes:
 
 
 class Deps:
-    def __init__(self) -> None:
+    def __init__(self, *, credits: int = 10) -> None:
         self.manuscripts = FakeManuscriptRepo()
         self.jobs = FakeAnalysisJobRepo()
         self.audit = FakeAuditRepo()
         self.blobs = FakeBlobStore()
+        self.tenants = FakeTenantRepo()
+        self.ledger = FakeLedgerRepo()
+        self.ledger.entries.append({"tenant_id": TENANT, "delta": credits, "reason": "purchase"})
 
     async def submit(self, data: bytes, filename: str | None) -> object:
         return await submit_manuscript(
@@ -38,6 +44,8 @@ class Deps:
             manuscripts=self.manuscripts,  # type: ignore[arg-type]
             jobs=self.jobs,  # type: ignore[arg-type]
             audit=self.audit,  # type: ignore[arg-type]
+            tenants=self.tenants,  # type: ignore[arg-type]
+            ledger=self.ledger,  # type: ignore[arg-type]
             blobs=self.blobs,  # type: ignore[arg-type]
             retention_days=30,
         )
@@ -91,3 +99,27 @@ async def test_submission_creates_job_and_audit_event() -> None:
     jobs = await deps.jobs.list_for_tenant(TENANT)
     assert [j.id for j in jobs] == [submitted.job_id]  # type: ignore[attr-defined]
     assert deps.audit.entries[0]["action"] == "upload"
+
+
+@pytest.mark.asyncio
+async def test_upload_without_credits_is_refused_and_stores_nothing() -> None:
+    deps = Deps(credits=0)
+
+    with pytest.raises(InsufficientCredits, match="0 available, 1 required"):
+        await deps.submit(_docx(), "essay.docx")
+
+    assert deps.blobs._data == {}
+    assert await deps.jobs.list_for_tenant(TENANT) == []
+
+
+@pytest.mark.asyncio
+async def test_upload_reserves_the_credit_under_the_tenant_lock() -> None:
+    deps = Deps(credits=1)
+
+    submitted = await deps.submit(_docx(), "essay.docx")
+
+    assert deps.tenants.locked == [TENANT]
+    assert await deps.ledger.has_entry(reservation_key(submitted.job_id))  # type: ignore[attr-defined]
+    assert await deps.ledger.balance(TENANT) == 0
+    with pytest.raises(InsufficientCredits):  # the last credit is spent
+        await deps.submit(_docx(), "essay.docx")

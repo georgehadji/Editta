@@ -12,8 +12,9 @@ Now, per step: transition state -> commit; checkpoint each pass the moment it
 finishes -> commit; on failure, record the policy's decision (retry with backoff, or
 DEAD + refund) atomically -> commit. A retried job resumes from its checkpoints.
 
-Credits: reserved once per job (idempotency key), refunded only when the job dies.
-A retry reuses the original reservation; a completed job keeps it.
+Credits: reserved at upload (services/uploads.py), refunded only when the job dies.
+The runner's own reservation is an idempotent fallback for jobs queued before upload-
+time reservation existed; for every other job it finds the key and appends nothing.
 
 Fencing: every job-state write is conditional on this run's `lease_owner` still
 holding the job (`set_state_if_owned`). If the lease was lost — the worker stalled
@@ -40,6 +41,7 @@ from editta.adapters.persistence.repositories import (
     PassResultRepository,
     ReportRepository,
 )
+from editta.domain.credits import refund_key, reservation_key
 from editta.domain.errors import EdittaError, LeaseLost
 from editta.domain.models import (
     ClaimedJob,
@@ -204,7 +206,7 @@ class JobRunner:
             tenant_id=job.tenant_id,
             delta=-self._job_cost_credits,
             reason="job",
-            idempotency_key=f"job:{job.job_id}:reserve",
+            idempotency_key=reservation_key(job.job_id),
             job_id=job.job_id,
         )
 
@@ -320,12 +322,12 @@ class JobRunner:
             )
             # Refund only what was actually reserved — a job that died before its
             # reservation committed must not mint a credit.
-            if await repos.ledger.has_entry(f"job:{job.job_id}:reserve"):
+            if await repos.ledger.has_entry(reservation_key(job.job_id)):
                 await repos.ledger.append_once(
                     tenant_id=job.tenant_id,
                     delta=self._job_cost_credits,
                     reason="refund",
-                    idempotency_key=f"job:{job.job_id}:refund",
+                    idempotency_key=refund_key(job.job_id),
                     job_id=job.job_id,
                 )
         return JobOutcome.dead(error=error)

@@ -1,6 +1,7 @@
 """FastAPI dependency-injection composition root. Explicit wiring, no DI framework."""
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -29,7 +30,7 @@ from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import Settings, load_settings
 from editta.domain.ports import BlobStore, EmailSender, LLMClient
-from editta.services.accounts import AccountService, InvalidSession
+from editta.services.accounts import AccountService, AuthenticatedUser, InvalidSession
 from editta.services.billing import BillingService
 
 SESSION_COOKIE_NAME = "editta_session"
@@ -41,6 +42,10 @@ class AuthContext:
     tenant_id: UUID
     user_id: UUID
     email: str
+    role: str = "editor"
+
+    def as_user(self) -> AuthenticatedUser:
+        return AuthenticatedUser(self.tenant_id, self.user_id, self.email, self.role)
 
 
 @lru_cache
@@ -78,22 +83,19 @@ def get_llm_client() -> LLMClient:
     )
 
 
-async def get_db_session() -> AsyncIterator[AsyncSession]:
-    """No RLS tenant context — only for pre-auth reads (tenant/user lookup during
-    magic-link issuance and verification, before we know who's logged in)."""
-    async with _app_session_factory()() as session:
-        yield session
-
-
 def get_account_service(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    uow: Annotated[UnitOfWork, Depends(get_uow)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AccountService:
-    return AccountService(
-        tenants=TenantRepository(session),
-        users=UserRepository(session),
-        session_secret=settings.session_secret,
-    )
+    """Every user lookup — including the pre-authentication ones — runs in its own
+    tenant-scoped transaction, so row-level security applies to login too."""
+
+    @asynccontextmanager
+    async def users(tenant_id: UUID) -> AsyncIterator[UserRepository]:
+        async with uow.begin(tenant_id) as session:
+            yield UserRepository(session)
+
+    return AccountService(users=users, session_secret=settings.session_secret)
 
 
 async def get_current_auth(
@@ -103,10 +105,12 @@ async def get_current_auth(
     if session_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not authenticated")
     try:
-        tenant_id, user_id, email = account_service.verify_session_cookie(session_token)
+        user = await account_service.authenticate_session(session_token)
     except InvalidSession as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
-    return AuthContext(tenant_id=tenant_id, user_id=user_id, email=email)
+    return AuthContext(
+        tenant_id=user.tenant_id, user_id=user.user_id, email=user.email, role=user.role
+    )
 
 
 async def get_tenant_session(
@@ -153,23 +157,43 @@ def get_audit_repo(
     return AuditEventRepository(session)
 
 
+def get_tenant_repo(
+    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+) -> TenantRepository:
+    return TenantRepository(session)
+
+
 @lru_cache
 def get_templates() -> Jinja2Templates:
     return Jinja2Templates(directory=TEMPLATES_DIR)
 
 
-@lru_cache
 def get_email_sender() -> EmailSender:
+    """SMTP when configured. The console sender (logs the link) exists for local
+    development only: in any other environment a missing SMTP config is an error, not
+    a silent fallback — a login link that is not emailed can be used by whoever sees it.
+    """
     settings = get_settings()
     if settings.smtp_host and settings.smtp_username and settings.smtp_password:
-        return SMTPEmailSender(
-            host=settings.smtp_host,
-            port=settings.smtp_port,
-            username=settings.smtp_username,
-            password=settings.smtp_password,
-            from_address=settings.smtp_from_address,
+        return _smtp_sender(
+            settings.smtp_host,
+            settings.smtp_port,
+            settings.smtp_username,
+            settings.smtp_password,
+            settings.smtp_from_address,
         )
-    return ConsoleEmailSender()
+    if settings.environment == "development":
+        return ConsoleEmailSender()
+    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "email delivery is not configured")
+
+
+@lru_cache
+def _smtp_sender(
+    host: str, port: int, username: str, password: str, from_address: str
+) -> EmailSender:
+    return SMTPEmailSender(
+        host=host, port=port, username=username, password=password, from_address=from_address
+    )
 
 
 @lru_cache

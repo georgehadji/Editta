@@ -81,6 +81,7 @@ class Worker:
             settings.anthropic_api_key, max_concurrency=settings.max_llm_concurrency
         )
         self._cost_ceiling_usd = settings.job_cost_ceiling_usd
+        self._job_cost_credits = settings.job_cost_credits
         self._shutdown = asyncio.Event()
 
     def request_shutdown(self) -> None:
@@ -109,6 +110,7 @@ class Worker:
             blobs=self._blobs,
             llm=self._llm,
             cost_ceiling_usd=self._cost_ceiling_usd,
+            job_cost_credits=self._job_cost_credits,
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(claimed.job_id))
         try:
