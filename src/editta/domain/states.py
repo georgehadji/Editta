@@ -85,10 +85,19 @@ def retry_delay_seconds(attempts_made: int) -> int:
 
 
 def decide_after_failure(
-    *, previous_attempts: int, retryable: bool, max_attempts: int = MAX_ATTEMPTS
+    *, attempts_made: int, retryable: bool, max_attempts: int = MAX_ATTEMPTS
 ) -> FailureDecision:
-    attempts_made = previous_attempts + 1
+    """`attempts_made` includes the attempt that just failed (claims count attempts)."""
+    if attempts_made < 1:
+        raise ValueError("attempts_made must be >= 1")
     if retryable and attempts_made < max_attempts:
         next_state = transition(JobState.FAILED, JobState.PENDING)
         return FailureDecision(attempts_made, next_state, retry_delay_seconds(attempts_made))
     return FailureDecision(attempts_made, transition(JobState.FAILED, JobState.DEAD), None)
+
+
+def attempts_exhausted(attempt: int, max_attempts: int = MAX_ATTEMPTS) -> bool:
+    """True when a claim hands out an attempt beyond the limit — only possible when
+    earlier attempts ended without recording a failure (worker crash, OOM, lost lease).
+    The job is dead-lettered at claim time instead of running yet again."""
+    return attempt > max_attempts

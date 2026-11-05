@@ -38,8 +38,8 @@ from editta.adapters.persistence.tables import Base
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import PostgresJobQueue
 from editta.adapters.storage.local import LocalBlobStore
-from editta.domain.errors import LLMError
-from editta.domain.models import ClaimedJob, JobOutcomeKind, PromptParts
+from editta.domain.errors import LeaseLost, LLMError, ParseError
+from editta.domain.models import JobOutcomeKind, PromptParts
 from editta.domain.states import JobState
 from editta.services.jobs import JobRunner
 from editta.worker.main import job_unit_of_work
@@ -237,14 +237,19 @@ async def test_deferred_job_is_not_claimable_until_its_backoff_elapses(
 
     async with pg_session_factory() as session:
         queue = PostgresJobQueue(session)
-        assert (await queue.claim(worker_id="w1")) is not None
-        await queue.defer(job_id, delay_seconds=3600)
+        first = await queue.claim(worker_id="w1")
+        assert first is not None and first.attempt == 1  # the claim counts the attempt
+        await queue.defer(job_id, "w1", delay_seconds=3600)
         assert await queue.claim(worker_id="w2") is None  # backing off
 
-        await queue.defer(job_id, delay_seconds=0)
-        await asyncio.sleep(0.01)
+        async with pg_session_factory() as admin:  # fast-forward the backoff
+            await admin.execute(
+                text("UPDATE analysis_jobs SET lease_expires_at = now() - interval '1 s'")
+            )
+            await admin.commit()
         reclaimed = await queue.claim(worker_id="w2")
         assert reclaimed is not None and reclaimed.job_id == job_id
+        assert (reclaimed.attempt, reclaimed.lease_owner) == (2, "w2")
 
 
 @pytest.mark.asyncio
@@ -252,14 +257,43 @@ async def test_dead_job_is_never_claimed_again(
     pg_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant_id, _, job_id = await _seed_job(pg_session_factory)
+    async with pg_session_factory() as session:
+        claimed = await PostgresJobQueue(session).claim(worker_id="w")
+        assert claimed is not None
 
     async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
-        await AnalysisJobRepository(session).record_failure(
-            tenant_id, job_id, state=JobState.DEAD, error="boom", attempts_made=3
+        await AnalysisJobRepository(session).set_state_if_owned(
+            tenant_id, job_id, lease_owner="w", state=JobState.DEAD, error="boom"
         )
-
     async with pg_session_factory() as session:
-        assert await PostgresJobQueue(session).claim(worker_id="w") is None
+        queue = PostgresJobQueue(session)
+        await queue.release(job_id, "w")
+        assert await queue.claim(worker_id="w") is None
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_lost_its_lease_cannot_write_release_or_defer(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _, job_id = await _seed_job(pg_session_factory)
+    async with pg_session_factory() as session:
+        queue = PostgresJobQueue(session)
+        assert await queue.claim(worker_id="w1", lease_seconds=0) is not None
+        await asyncio.sleep(0.01)  # w1's lease lapses (it stalled)
+        assert await queue.claim(worker_id="w2") is not None
+
+        await queue.release(job_id, "w1")  # fenced: must not free w2's job
+        await queue.defer(job_id, "w1", delay_seconds=0)
+        assert await queue.claim(worker_id="w3") is None
+
+    with pytest.raises(LeaseLost):
+        async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
+            await AnalysisJobRepository(session).set_state_if_owned(
+                tenant_id, job_id, lease_owner="w1", state=JobState.DEAD, error="stale"
+            )
+    async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
+        job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
+        assert job is not None and job.state == JobState.PENDING and job.lease_owner == "w2"
 
 
 @pytest.mark.asyncio
@@ -302,8 +336,10 @@ async def test_failed_attempt_keeps_checkpoints_and_retry_completes_on_real_db(
     runner = JobRunner(
         uow=job_unit_of_work(uow, tenant_id), blobs=blobs, llm=llm, cost_ceiling_usd=6.0
     )
-    claimed = ClaimedJob(job_id=job_id, tenant_id=tenant_id, manuscript_id=manuscript_id, attempt=0)
 
+    async with pg_session_factory() as session:
+        claimed = await PostgresJobQueue(session).claim(worker_id="w1")
+    assert claimed is not None and claimed.job_id == job_id
     first = await runner.run(claimed)
 
     assert first.kind is JobOutcomeKind.RETRY
@@ -316,9 +352,16 @@ async def test_failed_attempt_keeps_checkpoints_and_retry_completes_on_real_db(
         assert await ledger.has_entry(f"job:{job_id}:reserve")
         assert not await ledger.has_entry(f"job:{job_id}:refund")
 
+    async with pg_session_factory() as session:
+        queue = PostgresJobQueue(session)
+        await queue.defer(job_id, "w1", delay_seconds=0)
+        await asyncio.sleep(0.01)
+        retry = await queue.claim(worker_id="w1")
+    assert retry is not None and retry.attempt == 2
+
     failing["active"] = False
     calls_before = len(llm.calls)
-    second = await runner.run(claimed.model_copy(update={"attempt": 1}))
+    second = await runner.run(retry)
 
     assert second.kind is JobOutcomeKind.COMPLETED
     assert len(llm.calls) - calls_before == 2  # structure + synthesis
@@ -327,6 +370,45 @@ async def test_failed_attempt_keeps_checkpoints_and_retry_completes_on_real_db(
         assert job is not None and job.state == JobState.COMPLETED
         assert await ReportRepository(session).get_by_job_id(job_id) is not None
         assert await CreditLedgerRepository(session).balance(tenant_id) == -1
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_kill_or_refund_a_job_another_worker_completed(
+    pg_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    """The reviewer's free-report scenario, on real Postgres: w1 stalls past its lease,
+    w2 reclaims and completes the job, then w1 fails deterministically. Before fencing,
+    w1 would overwrite COMPLETED with DEAD and refund the credit."""
+    blobs = LocalBlobStore(tmp_path)
+    await blobs.put("raw/essay", _chunk(_docx_bytes(MANUSCRIPT_TEXT)))
+    tenant_id, _, job_id = await _seed_job(
+        pg_session_factory, blob_key="raw/essay", title="essay.docx"
+    )
+    uow = UnitOfWork(pg_session_factory)
+    async with pg_session_factory() as session:
+        queue = PostgresJobQueue(session)
+        stale = await queue.claim(worker_id="w1", lease_seconds=0)
+        await asyncio.sleep(0.01)
+        fresh = await queue.claim(worker_id="w2")
+    assert stale is not None and fresh is not None
+
+    ok_llm = FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT)
+    done = await JobRunner(
+        uow=job_unit_of_work(uow, tenant_id), blobs=blobs, llm=ok_llm, cost_ceiling_usd=6.0
+    ).run(fresh)
+    doomed_llm = FakeLLMClient(
+        manuscript_text=MANUSCRIPT_TEXT, fail_when=lambda _parts: ParseError("boom")
+    )
+    late = await JobRunner(
+        uow=job_unit_of_work(uow, tenant_id), blobs=blobs, llm=doomed_llm, cost_ceiling_usd=6.0
+    ).run(stale)
+
+    assert done.kind is JobOutcomeKind.COMPLETED
+    assert late.kind is JobOutcomeKind.ABANDONED
+    async with uow.begin(tenant_id) as session:
+        job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
+        assert job is not None and job.state == JobState.COMPLETED
+        assert not await CreditLedgerRepository(session).has_entry(f"job:{job_id}:refund")
 
 
 MANUSCRIPT_TEXT = "This is a Greek essay about language and structure and much more content here."

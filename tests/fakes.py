@@ -1,5 +1,6 @@
 """FakeLLM adapter for pipeline tests — no network calls, deterministic output."""
 
+import re
 from collections.abc import Callable
 from typing import TypeVar, cast
 
@@ -13,8 +14,8 @@ from editta.domain.models import (
     PassFindings,
     PromptParts,
     Severity,
-    SynthesisReport,
-    SynthesisSection,
+    SynthesisPlan,
+    SynthesisPlanSection,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -26,8 +27,8 @@ class FakeLLMClient:
     """Deterministic LLM fake.
 
     * Analysis passes return one finding quoting the first 20 chars of the manuscript.
-    * Synthesis echoes every pass finding it was given into one section, plus any
-      `extra_synthesis_findings` (to test that ungrounded ones get dropped).
+    * Synthesis cites every finding id it was shown in one section, plus any
+      `extra_synthesis_ids` (to test that unknown/hallucinated ids are dropped).
     * `fail_when` lets a test make specific calls raise.
     """
 
@@ -36,11 +37,11 @@ class FakeLLMClient:
         manuscript_text: str,
         *,
         fail_when: FailureRule | None = None,
-        extra_synthesis_findings: list[Finding] | None = None,
+        extra_synthesis_ids: list[str] | None = None,
     ) -> None:
         self._manuscript_text = manuscript_text
         self._fail_when = fail_when
-        self._extra_synthesis_findings = extra_synthesis_findings or []
+        self._extra_synthesis_ids = extra_synthesis_ids or []
         self.calls: list[tuple[str, CachePolicy]] = []
         self.prompts: list[PromptParts] = []
         self.efforts: list[str] = []
@@ -65,14 +66,15 @@ class FakeLLMClient:
             cache_read_tokens=100 if cache is CachePolicy.READ else 0,
         )
         output: BaseModel
-        if schema is SynthesisReport:
-            output = SynthesisReport(
+        if schema is SynthesisPlan:
+            shown_ids = re.findall(r'"id": "([^"]+)"', parts.instructions)
+            output = SynthesisPlan(
                 overview="fake overview",
                 sections=[
-                    SynthesisSection(
+                    SynthesisPlanSection(
                         title="Language",
                         summary="fake summary",
-                        findings=[self._finding(), *self._extra_synthesis_findings],
+                        finding_ids=[*shown_ids, *self._extra_synthesis_ids],
                     )
                 ],
             )

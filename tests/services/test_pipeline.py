@@ -44,8 +44,8 @@ async def test_run_pipeline_primes_cache_before_fanning_out() -> None:
         manuscript_bytes=manuscript_bytes, filename="essay.docx", llm=llm, cost_ceiling_usd=6.0
     )
 
-    assert llm.calls[0][1] == CachePolicy.WRITE
-    assert all(cache == CachePolicy.READ for _, cache in llm.calls[1:])
+    caches = [cache for _, cache in llm.calls]
+    assert caches == [CachePolicy.WRITE] + [CachePolicy.READ] * 3 + [CachePolicy.NONE]
 
 
 @pytest.mark.asyncio

@@ -1,16 +1,18 @@
 """AnalysisPass Protocol + shared prompt scaffolding (Template method).
 
-Prompt-cache invariant (PLAN.md §4): every call for one manuscript — the four analysis
-passes *and* synthesis — must send a byte-identical prefix, or the cached manuscript
-is not reused. The cache key covers, in order, tools -> system -> messages, and per the
-Anthropic prompt-caching docs a change to `output_config.effort` (or the thinking
-config) also invalidates the messages cache, where the manuscript lives. So these
-three things are fixed here, once, for all passes:
+Prompt-cache invariant (PLAN.md §4): the four analysis passes must send a byte-
+identical prefix, or passes 2–4 re-pay the full manuscript instead of reading it at
+0.1x. Per the Anthropic prompt-caching docs the cache key covers tools -> system ->
+messages, and an `output_config.effort` change (or a thinking-config change) also
+invalidates the messages cache, where the manuscript lives. So these are fixed here,
+once, for all passes:
 
   * system prompt  -> SYSTEM_PREAMBLE (pass-specific text goes *after* the manuscript)
   * effort         -> SHARED_EFFORT
+  * output schema  -> PassFindings (a format change also invalidates the cache)
   * thinking mode  -> fixed in the LLM adapter
 
+Synthesis cannot join this prefix — it needs its own schema — see passes/synthesis.py.
 Per-pass effort is possible via the beta per-message effort feature, but that is a
 beta header we have not verified against a live key; uniform effort is the robust
 choice. Opus 5's API default is "high", so this equals omitting the parameter.

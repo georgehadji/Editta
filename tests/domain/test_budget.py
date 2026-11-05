@@ -32,17 +32,29 @@ def test_check_budget_raises_over_ceiling() -> None:
     assert exc_info.value.projected_usd == 7.0
 
 
-def test_projection_for_a_fresh_job_writes_once_then_reads() -> None:
-    # 175k prefix, 4 passes + synthesis: 1 write + 4 reads, 5 x 10k output allowance.
+def test_projection_for_a_fresh_job_prices_synthesis_uncached() -> None:
+    # 175k prefix: pass 1 writes the cache, passes 2-4 read it; synthesis has its own
+    # output schema, which invalidates the cache, so it pays full input price.
     projected = project_remaining_cost_usd(prefix_tokens=175_000, analysis_calls_remaining=4)
     expected = estimate_cost_usd(
         cache_write_tokens=175_000,
-        cache_read_tokens=175_000 * 4,
-        plain_input_tokens=ASSUMED_SYNTHESIS_EXTRA_INPUT_TOKENS,
+        cache_read_tokens=175_000 * 3,
+        plain_input_tokens=175_000 + ASSUMED_SYNTHESIS_EXTRA_INPUT_TOKENS,
         output_tokens=ASSUMED_OUTPUT_TOKENS_PER_CALL * 5,
     )
     assert projected == pytest.approx(expected)
-    assert projected < 6.0  # the default ceiling admits a typical Greek essay
+    assert projected < 6.0  # the default ceiling still admits a typical Greek essay
+
+
+def test_synthesis_only_resume_writes_no_cache() -> None:
+    projected = project_remaining_cost_usd(prefix_tokens=100_000, analysis_calls_remaining=0)
+    expected = estimate_cost_usd(
+        cache_write_tokens=0,
+        cache_read_tokens=0,
+        plain_input_tokens=100_000 + ASSUMED_SYNTHESIS_EXTRA_INPUT_TOKENS,
+        output_tokens=ASSUMED_OUTPUT_TOKENS_PER_CALL,
+    )
+    assert projected == pytest.approx(expected)
 
 
 def test_projection_for_a_resumed_job_counts_only_remaining_calls() -> None:

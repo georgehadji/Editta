@@ -116,8 +116,9 @@ class Worker:
         except Exception:
             # The runner records every job failure itself; reaching here means that
             # recording failed too (e.g. the database is down). Keep the lease: it
-            # expires on its own and the job is reclaimed then — an implicit backoff —
-            # and the worker loop survives instead of crashing on one bad job.
+            # expires on its own and the job is reclaimed then — an implicit backoff,
+            # bounded because every claim counts an attempt — and the worker loop
+            # survives instead of crashing on one bad job.
             log.exception("worker.job_unrecorded_failure")
             return
         finally:
@@ -125,12 +126,25 @@ class Worker:
             with suppress(asyncio.CancelledError):
                 await heartbeat_task
 
-        async with self._queue_sessions() as session:
-            queue = PostgresJobQueue(session)
-            if outcome.kind is JobOutcomeKind.RETRY and outcome.retry_after_seconds is not None:
-                await queue.defer(claimed.job_id, delay_seconds=outcome.retry_after_seconds)
-            else:
-                await queue.release(claimed.job_id)
+        if outcome.kind is JobOutcomeKind.ABANDONED:
+            # Another worker owns the job now; releasing or deferring is theirs to do
+            # (and the fenced queue calls would be no-ops anyway).
+            log.warning("worker.job_abandoned", error=outcome.error)
+            return
+        try:
+            async with self._queue_sessions() as session:
+                queue = PostgresJobQueue(session)
+                if outcome.kind is JobOutcomeKind.RETRY and outcome.retry_after_seconds:
+                    await queue.defer(
+                        claimed.job_id, self._worker_id, delay_seconds=outcome.retry_after_seconds
+                    )
+                else:
+                    await queue.release(claimed.job_id, self._worker_id)
+        except Exception:
+            # Outcome is already recorded; only the lease hand-back failed. It expires
+            # on its own, and a terminal job is never claimed again.
+            log.exception("worker.lease_handback_failed", outcome=outcome.kind.value)
+            return
         log.info(
             "worker.job_finished",
             outcome=outcome.kind.value,
@@ -139,10 +153,16 @@ class Worker:
         )
 
     async def _heartbeat_loop(self, job_id: uuid.UUID) -> None:
+        """Extends the lease until cancelled. Never dies on a transient error: a dead
+        heartbeat task would silently let the lease lapse, and re-raise from the
+        `await` in `_process`'s finally — crashing the worker loop."""
         while True:
             await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
-            async with self._queue_sessions() as session:
-                await PostgresJobQueue(session).heartbeat(job_id, self._worker_id)
+            try:
+                async with self._queue_sessions() as session:
+                    await PostgresJobQueue(session).heartbeat(job_id, self._worker_id)
+            except Exception:
+                logger.exception("worker.heartbeat_failed", job_id=str(job_id))
 
 
 async def _run(settings: Settings) -> None:

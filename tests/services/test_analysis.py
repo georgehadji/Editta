@@ -1,13 +1,12 @@
 import pytest
 
-from editta.domain.errors import BudgetExceeded, LLMError
+from editta.domain.errors import BudgetExceeded, LLMError, LLMRequestRejected
 from editta.domain.models import (
     CachePolicy,
-    Finding,
     ManuscriptText,
+    PassFindings,
     PassResult,
     PromptParts,
-    Severity,
 )
 from editta.passes.base import SHARED_EFFORT, SYSTEM_PREAMBLE
 from editta.services.analysis import ANALYSIS_PASSES, preflight, run_passes, run_synthesis
@@ -18,16 +17,28 @@ MANUSCRIPT = ManuscriptText(source_filename="essay.docx", text=TEXT)
 
 
 @pytest.mark.asyncio
-async def test_every_llm_call_for_a_manuscript_shares_the_cacheable_prefix() -> None:
+async def test_the_four_passes_share_one_cacheable_prefix() -> None:
     llm = FakeLLMClient(manuscript_text=TEXT)
 
-    results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
-    await run_synthesis(MANUSCRIPT, results, llm)
+    await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
 
-    assert len(llm.prompts) == 5
+    assert len(llm.prompts) == 4
     assert {p.system for p in llm.prompts} == {SYSTEM_PREAMBLE}
     assert {p.manuscript_block for p in llm.prompts} == {TEXT}
     assert set(llm.efforts) == {SHARED_EFFORT}
+    assert {p.output_schema for p in ANALYSIS_PASSES} == {PassFindings}
+
+
+@pytest.mark.asyncio
+async def test_synthesis_sends_no_cache_marker() -> None:
+    """Its schema differs, so it cannot read the passes' cache; a marker would only
+    write a fresh entry at 1.25x that nothing reuses."""
+    llm = FakeLLMClient(manuscript_text=TEXT)
+    results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
+
+    await run_synthesis(MANUSCRIPT, results, llm)
+
+    assert llm.calls[-1][1] is CachePolicy.NONE
 
 
 @pytest.mark.asyncio
@@ -59,22 +70,31 @@ async def test_completed_siblings_reach_the_hook_before_a_failure_propagates() -
 
 
 @pytest.mark.asyncio
-async def test_synthesis_output_is_anchored_before_it_reaches_the_report() -> None:
-    hallucinated = Finding(
-        section="ch9",
-        quote="μια φράση που δεν γράφτηκε ποτέ από τον συγγραφέα",
-        issue="invented",
-        severity=Severity.MAJOR,
-        suggestion="n/a",
-    )
-    llm = FakeLLMClient(manuscript_text=TEXT, extra_synthesis_findings=[hallucinated])
+async def test_synthesis_can_only_cite_existing_findings() -> None:
+    llm = FakeLLMClient(manuscript_text=TEXT, extra_synthesis_ids=["language-99", "injected"])
     results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
+    originals = [f for r in results for f in r.findings]
 
     synthesis = await run_synthesis(MANUSCRIPT, results, llm)
 
     reported = [f for s in synthesis.sections for f in s.findings]
-    assert hallucinated not in reported
-    assert reported  # grounded findings echoed from the passes survive
+    assert len(reported) == len(originals)  # unknown ids dropped, nothing added
+    assert all(f in originals for f in reported)
+
+
+@pytest.mark.asyncio
+async def test_a_non_retryable_sibling_failure_decides_the_job() -> None:
+    def rule(parts: PromptParts) -> BaseException | None:
+        if parts.instructions.startswith("Analyze structure"):
+            return LLMError("overloaded")
+        if parts.instructions.startswith("Analyze metadata"):
+            return LLMRequestRejected("bad request")
+        return None
+
+    llm = FakeLLMClient(manuscript_text=TEXT, fail_when=rule)
+
+    with pytest.raises(LLMRequestRejected):
+        await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
 
 
 @pytest.mark.asyncio

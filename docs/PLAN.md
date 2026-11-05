@@ -185,7 +185,7 @@ CANCELLED reachable from any non-terminal state.
 
 Each pass checkpoint persists to `PassResult` on completion. **Retry resumes from the last checkpoint — completed passes are never re-run and never re-billed in tokens.**
 
-**Transactions:** every pipeline step commits in its own short transaction (`services/jobs.py`); no LLM call runs inside an open transaction. A failure therefore never rolls back checkpoints or its own FAILED record. **Retry policy** (`domain/states.py`): `EdittaError.retryable` decides — `LLMError` retries with exponential backoff (60s, 120s, … cap 30 min, via `JobQueue.defer`, i.e. the lease's expiry) up to 3 attempts; `ParseError`/`BudgetExceeded` go straight to DEAD. The credit is reserved once per job and refunded only on DEAD.
+**Transactions:** every pipeline step commits in its own short transaction (`services/jobs.py`); no LLM call runs inside an open transaction. A failure therefore never rolls back checkpoints or its own FAILED record. **Retry policy** (`domain/states.py`): `EdittaError.retryable` decides — `LLMError` retries with exponential backoff (60s, 120s, … cap 30 min, via `JobQueue.defer`, i.e. the lease's expiry) up to 3 attempts; `ParseError`/`BudgetExceeded` go straight to DEAD. The credit is reserved once per job and refunded only on DEAD. **Attempts are counted at claim** (the claim UPDATE increments `attempt`), so a worker crash or OOM still consumes one and a crash-looping job is dead-lettered instead of re-run forever. **Fencing:** every runner state write is conditional on its `lease_owner` (`set_state_if_owned`), and `release`/`defer` are fenced the same way; a worker that lost its lease abandons the job without writing, so it cannot DEAD-and-refund a job another worker completed. Synthesis is checkpointed like the passes.
 
 ---
 
@@ -200,23 +200,24 @@ Each pass checkpoint persists to `PassResult` on completion. **Retry resumes fro
 2. Pass 1 (language)       → manuscript block marked cache_control
                              (cache WRITE, 1.25×) — await first token
 3. Passes 2–4              → asyncio.gather, same prefix (cache READ, 0.1×)
-4. Synthesis               → same cached prefix + 4 compact JSON pass results
+4. Synthesis               → manuscript (uncached: different output schema) + findings
+                             JSON with ids; returns a plan that cites findings by id
 ```
 
 **Ordering matters:** the cache becomes readable only after the first response begins. Prime with one call, then fan out — firing all 4 concurrently pays full input price 4×. The budget ceiling is checked **before** the first billable call, from the `count_tokens` preflight (`domain/budget.project_remaining_cost_usd`), on both the CLI and the worker path (shared core: `services/analysis.py`).
 
 | Cost component | ≈ per manuscript |
 |---|---|
-| Input w/ caching (1×1.25 write + 4×0.1 reads on ~175k) | ~$1.45 |
+| Input w/ caching (1×1.25 write + 3×0.1 reads + 1× uncached synthesis on ~175k) | ~$2.2 |
 | Output (~25k tokens across 5 calls) | ~$0.60 |
-| **Total** | **~$2.05** |
+| **Total** | **~$2.9** (synthesis cannot share the cache; see below) |
 
-At 25–40€/report → ~93% gross margin. **Budget guardrail:** `domain/budget.py` computes a hard cost ceiling per job (default $6); the pipeline aborts (state FAILED, credit refunded) if projected cost exceeds it.
+At 25–40€/report → ~89–93% gross margin (~$2.9 LLM cost per report). **Budget guardrail:** `domain/budget.py` computes a hard cost ceiling per job (default $6); the pipeline aborts before any billable call (state DEAD, credit refunded) if projected cost exceeds it.
 
 **Further token techniques:**
 
 - **Structured outputs** (`output_config.format` + Pydantic schema) on all 4 analysis passes: compact JSON findings (`section`, `quote`, `issue`, `severity`, `suggestion`) — no prose padding in intermediate results, guaranteed parseable, zero retry-on-malformed-JSON waste.
-- **Adaptive thinking** (`thinking: {type: "adaptive"}`) with one `effort` (`"high"`, the Opus 5 default) for **all** passes and synthesis. Per the prompt-caching docs, changing `output_config.effort` invalidates the messages cache — where the manuscript lives — so mixed per-pass effort silently turns cache reads into full-price misses. Synthesis likewise shares the passes' system prompt; its own instructions go after the cached prefix. Per-pass effort is possible later via the beta per-message effort feature (`passes/base.py`).
+- **Adaptive thinking** (`thinking: {type: "adaptive"}`) with one `effort` (`"high"`, the Opus 5 default) for **all** passes and synthesis. Per the prompt-caching docs, changing `output_config.effort` invalidates the messages cache — where the manuscript lives — so mixed per-pass effort silently turns cache reads into full-price misses. The passes must also share one output schema: per the structured-outputs docs, changing `output_config.format` invalidates the prompt cache. **Synthesis therefore cannot read the passes' cache** (it has its own schema); it sends no `cache_control` and the budget prices its manuscript input at the full rate. Per-pass effort is possible later via the beta per-message effort feature (`passes/base.py`).
 - **Checkpoint resume** (§3) — failed jobs never re-pay completed passes.
 - **Batches API (Phase 5):** 50% off everything for bulk/overnight submissions ("upload evening, reports by morning"). Same code path, different endpoint — designed behind the `LLMClient` port from day one.
 - **Never estimate Greek tokens with tiktoken** — always the `count_tokens` endpoint.
@@ -238,7 +239,7 @@ Manuscripts are unpublished intellectual property — confidentiality is the pro
 **Prompt-injection defense (manuscripts are untrusted input):**
 - Manuscript text isolated in a clearly delimited data block; system prompt states it is content to analyze, never instructions.
 - No tools enabled on analysis calls; structured-output schema constrains the response shape.
-- **Quote anchoring:** every finding must include a verbatim quote; the pipeline verifies the quote exists in the source text (fuzzy match ≥ 0.9). Kills both injection-steered and hallucinated findings before they reach an editor. Applied to the **synthesis output too** — that is what the DOCX shows — where each finding must also trace to a finding some pass produced (synthesis adds no new findings, enforced in `domain/quotes.anchor_synthesis`).
+- **Quote anchoring:** every finding must include a verbatim quote; the pipeline verifies the quote exists in the source text (fuzzy match ≥ 0.9). Kills both injection-steered and hallucinated findings before they reach an editor. **Synthesis cites findings by id** (`SynthesisPlan.finding_ids`, resolved in `domain/synthesis.py`): its output type cannot carry a finding, so it cannot add, alter or re-quote one — unknown ids are dropped. Its overview/section summaries remain free prose.
 
 **Tenancy & access:**
 - Every repository method takes `tenant_id`; Postgres **Row-Level Security** as defense-in-depth (second, independent enforcement layer).

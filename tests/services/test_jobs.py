@@ -1,10 +1,11 @@
 import io
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import docx
 import pytest
 
-from editta.domain.errors import LLMError
+from editta.domain.errors import LLMError, ParseError
 from editta.domain.models import CachePolicy, ClaimedJob, JobOutcomeKind, PromptParts
 from editta.domain.states import JobState, retry_delay_seconds
 from editta.services.jobs import JobRunner, _pass_checkpoint_key
@@ -13,6 +14,7 @@ from tests.services.fakes import FakeBlobStore, FakeJobUnitOfWork, _PassResultRe
 
 MANUSCRIPT_TEXT = "This is a Greek essay about language and structure and much more content here."
 STRUCTURE_MARKER_PREFIX = "Analyze structure"
+WORKER = "worker-1"
 
 
 def _docx_bytes(text: str) -> bytes:
@@ -38,16 +40,20 @@ class Harness:
         self.uow.manuscripts.seed(
             self.tenant_id, self.manuscript_id, blob_key="raw/essay", title="essay.docx"
         )
-        self.uow.jobs.seed(self.tenant_id, self.job_id, self.manuscript_id)
+        self.uow.jobs.seed(self.tenant_id, self.job_id, self.manuscript_id, lease_owner=WORKER)
         self.blobs.seed("raw/essay", _docx_bytes(MANUSCRIPT_TEXT))
 
-    def claimed(self, attempt: int = 0) -> ClaimedJob:
+    def claimed(self, attempt: int = 1) -> ClaimedJob:
         return ClaimedJob(
             job_id=self.job_id,
             tenant_id=self.tenant_id,
             manuscript_id=self.manuscript_id,
             attempt=attempt,
+            lease_owner=WORKER,
         )
+
+    def steal_lease(self) -> None:
+        self.job.lease_owner = "another-worker"  # type: ignore[attr-defined]
 
     @property
     def job(self) -> object:
@@ -81,7 +87,13 @@ async def test_happy_path_completes_writes_report_and_reserves_one_credit() -> N
         JobState.EXPORTING,
         JobState.COMPLETED,
     ]
-    assert len(await h.checkpointed()) == 4
+    assert await h.checkpointed() == {
+        "language",
+        "structure",
+        "metadata",
+        "integrity",
+        "synthesis",
+    }
     assert len(h.uow.reports.created) == 1
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []
@@ -109,7 +121,7 @@ async def test_resume_runs_only_missing_passes_and_reprimes_the_cache() -> None:
         usage = {"input_tokens": 1, "output_tokens": 1}
         h.uow.pass_results.seed(_PassResultRecord(h.job_id, pass_name, key, "fake-model", usage))
 
-    outcome = await h.runner.run(h.claimed(attempt=1))
+    outcome = await h.runner.run(h.claimed(attempt=2))
 
     assert outcome.kind is JobOutcomeKind.COMPLETED
     # 2 missing passes + synthesis; the first remaining pass re-writes the cache.
@@ -153,12 +165,11 @@ async def test_retryable_failure_keeps_sibling_checkpoints_and_backs_off() -> No
     )
     h = Harness(llm=llm)
 
-    outcome = await h.runner.run(h.claimed(attempt=0))
+    outcome = await h.runner.run(h.claimed(attempt=1))
 
     assert outcome.kind is JobOutcomeKind.RETRY
     assert outcome.retry_after_seconds == retry_delay_seconds(1)
     assert h.job.state is JobState.PENDING  # type: ignore[attr-defined]
-    assert h.job.attempt == 1  # type: ignore[attr-defined]
     # The core regression: completed passes are committed, not rolled back with the
     # failure — so the retry won't pay for them again.
     assert await h.checkpointed() == {"language", "metadata", "integrity"}
@@ -177,11 +188,11 @@ async def test_retry_after_failure_reruns_only_the_failed_pass() -> None:
 
     llm = FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT, fail_when=rule)
     h = Harness(llm=llm)
-    await h.runner.run(h.claimed(attempt=0))
+    await h.runner.run(h.claimed(attempt=1))
     calls_before_retry = len(llm.calls)
     failing["active"] = False
 
-    outcome = await h.runner.run(h.claimed(attempt=1))
+    outcome = await h.runner.run(h.claimed(attempt=2))
 
     assert outcome.kind is JobOutcomeKind.COMPLETED
     assert len(llm.calls) - calls_before_retry == 2  # structure + synthesis only
@@ -196,10 +207,9 @@ async def test_retryable_failure_on_last_attempt_goes_dead_and_refunds() -> None
     )
     h = Harness(llm=llm)
 
-    outcome = await h.runner.run(h.claimed(attempt=2))
+    outcome = await h.runner.run(h.claimed(attempt=3))
 
     assert outcome.kind is JobOutcomeKind.DEAD
-    assert h.job.attempt == 3  # type: ignore[attr-defined]
     assert h.ledger("refund") == [1]
 
 
@@ -227,7 +237,6 @@ async def test_unparseable_manuscript_dies_immediately() -> None:
     outcome = await h.runner.run(h.claimed())
 
     assert outcome.kind is JobOutcomeKind.DEAD
-    assert h.job.attempt == 1  # type: ignore[attr-defined]
     assert h.llm.calls == []
     assert h.ledger("refund") == [1]
 
@@ -242,3 +251,90 @@ async def test_missing_manuscript_does_not_mint_a_credit() -> None:
     assert outcome.kind is JobOutcomeKind.DEAD
     # Reservation committed in its own transaction, so the refund nets to zero.
     assert sum(h.ledger("job") + h.ledger("refund")) == 0
+
+
+@pytest.mark.asyncio
+async def test_attempt_beyond_the_limit_is_dead_lettered_without_running() -> None:
+    """Attempts that crashed without recording anything still count (the claim
+    increments them), so a crash-looping job ends instead of re-running forever."""
+    h = Harness()
+    await h.uow.ledger.append_once(
+        tenant_id=h.tenant_id, delta=-1, reason="job", idempotency_key=f"job:{h.job_id}:reserve"
+    )
+
+    outcome = await h.runner.run(h.claimed(attempt=4))
+
+    assert outcome.kind is JobOutcomeKind.DEAD
+    assert "3 attempts" in (outcome.error or "")
+    assert h.llm.calls == [] and h.llm.token_counts == 0
+    assert h.ledger("refund") == [1]
+
+
+@pytest.mark.asyncio
+async def test_exhausted_job_without_reservation_gets_no_refund() -> None:
+    h = Harness()
+
+    outcome = await h.runner.run(h.claimed(attempt=4))
+
+    assert outcome.kind is JobOutcomeKind.DEAD
+    assert h.ledger("refund") == []
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_abandons_without_touching_the_new_owners_job() -> None:
+    h = Harness()
+
+    def steal_during_structure(parts: PromptParts) -> BaseException | None:
+        if parts.instructions.startswith(STRUCTURE_MARKER_PREFIX):
+            h.steal_lease()  # e.g. we stalled past lease expiry and were reclaimed
+        return None
+
+    h.llm = FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT, fail_when=steal_during_structure)
+    h.runner._llm = h.llm
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.ABANDONED
+    assert JobState.COMPLETED not in [s for s, _ in h.uow.jobs.state_history]
+    assert h.uow.reports.created == []
+    assert h.ledger("refund") == []
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_during_failure_handling_neither_kills_nor_refunds() -> None:
+    def steal_then_fail(parts: PromptParts) -> BaseException | None:
+        h.steal_lease()
+        return ParseError("deterministic failure")
+
+    h = Harness(llm=FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT, fail_when=steal_then_fail))
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.ABANDONED
+    assert JobState.DEAD not in [s for s, _ in h.uow.jobs.state_history]
+    assert h.ledger("refund") == []
+
+
+@pytest.mark.asyncio
+async def test_synthesis_is_checkpointed_so_an_export_failure_does_not_rebill_it() -> None:
+    class FlakyReportStore(FakeBlobStore):
+        fail_report_once = True
+
+        async def put(self, key: str, data: AsyncIterator[bytes]) -> None:
+            if key.endswith("report.docx") and self.fail_report_once:
+                self.fail_report_once = False
+                raise OSError("object store unavailable")
+            await super().put(key, data)
+
+    h = Harness()
+    h.blobs = FlakyReportStore()
+    h.blobs.seed("raw/essay", _docx_bytes(MANUSCRIPT_TEXT))
+    h.runner._blobs = h.blobs
+
+    first = await h.runner.run(h.claimed(attempt=1))
+    calls_after_first = len(h.llm.calls)
+    second = await h.runner.run(h.claimed(attempt=2))
+
+    assert first.kind is JobOutcomeKind.RETRY
+    assert second.kind is JobOutcomeKind.COMPLETED
+    assert len(h.llm.calls) == calls_after_first  # neither passes nor synthesis re-run

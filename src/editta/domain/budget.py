@@ -46,20 +46,30 @@ def project_remaining_cost_usd(
 ) -> float:
     """Projected cost of the calls a job still has to make.
 
-    The first remaining call writes the shared prefix to the cache (1.25x); every later
-    call reads it (0.1x). On a resumed job the first remaining call re-writes the
-    prefix, because a cache written by a previous attempt has almost certainly expired.
+    Analysis passes: the first remaining one writes the shared prefix to the cache
+    (1.25x), the rest read it (0.1x). On a resumed job that first call re-writes it —
+    a cache written by an earlier attempt has almost certainly expired (5 min TTL).
+
+    Synthesis is priced at the full, uncached input rate: it uses a different
+    structured-output schema, and per the Anthropic structured-outputs docs changing
+    `output_config.format` invalidates the prompt cache. Pricing it as a cache read
+    would under-project by ~0.9x the manuscript and let over-ceiling jobs through.
     """
     if analysis_calls_remaining < 0:
         raise ValueError("analysis_calls_remaining must be >= 0")
-    calls = analysis_calls_remaining + (1 if include_synthesis else 0)
-    if calls == 0:
+    output_calls = analysis_calls_remaining + (1 if include_synthesis else 0)
+    if output_calls == 0:
         return 0.0
+    writes = prefix_tokens if analysis_calls_remaining else 0
+    reads = prefix_tokens * max(analysis_calls_remaining - 1, 0)
+    synthesis_input = (
+        prefix_tokens + ASSUMED_SYNTHESIS_EXTRA_INPUT_TOKENS if include_synthesis else 0
+    )
     return estimate_cost_usd(
-        cache_write_tokens=prefix_tokens,
-        cache_read_tokens=prefix_tokens * (calls - 1),
-        plain_input_tokens=ASSUMED_SYNTHESIS_EXTRA_INPUT_TOKENS if include_synthesis else 0,
-        output_tokens=output_tokens_per_call * calls,
+        cache_write_tokens=writes,
+        cache_read_tokens=reads,
+        plain_input_tokens=synthesis_input,
+        output_tokens=output_tokens_per_call * output_calls,
     )
 
 

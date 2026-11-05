@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
+from editta.domain.errors import LeaseLost
 from editta.domain.states import JobState
 
 
@@ -75,6 +76,7 @@ class _JobRecord:
         self.state = JobState.PENDING
         self.error: str | None = None
         self.attempt = 0
+        self.lease_owner: str | None = None
         self.cost_input_tokens = 0
         self.cost_output_tokens = 0
         self.cache_read_tokens = 0
@@ -104,18 +106,29 @@ class FakeAnalysisJobRepo:
         if record is not None:
             record.state, record.error = state, error
 
-    def seed(self, tenant_id: UUID, job_id: UUID, manuscript_id: UUID) -> _JobRecord:
+    def seed(
+        self, tenant_id: UUID, job_id: UUID, manuscript_id: UUID, *, lease_owner: str | None
+    ) -> _JobRecord:
         record = _JobRecord(tenant_id, manuscript_id)
         record.id = job_id
+        record.lease_owner = lease_owner
         self._records[(tenant_id, job_id)] = record
         return record
 
-    async def record_failure(
-        self, tenant_id: UUID, job_id: UUID, *, state: str, error: str, attempts_made: int
+    async def set_state_if_owned(
+        self,
+        tenant_id: UUID,
+        job_id: UUID,
+        *,
+        lease_owner: str,
+        state: str,
+        error: str | None = None,
     ) -> None:
+        record = self._records.get((tenant_id, job_id))
+        if record is None or record.lease_owner != lease_owner:
+            raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
         self.state_history.append((JobState(state), error))
-        record = self._records[(tenant_id, job_id)]
-        record.state, record.error, record.attempt = JobState(state), error, attempts_made
+        record.state, record.error = JobState(state), error
 
     async def record_usage(
         self,

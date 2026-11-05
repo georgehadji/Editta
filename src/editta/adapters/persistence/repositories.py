@@ -21,6 +21,7 @@ from editta.adapters.persistence.tables import (
     Tenant,
     User,
 )
+from editta.domain.errors import LeaseLost
 
 
 class TenantRepository:
@@ -121,16 +122,30 @@ class AnalysisJobRepository:
         job.error = error
         await self._session.flush()
 
-    async def record_failure(
-        self, tenant_id: UUID, job_id: UUID, *, state: str, error: str, attempts_made: int
+    async def set_state_if_owned(
+        self,
+        tenant_id: UUID,
+        job_id: UUID,
+        *,
+        lease_owner: str,
+        state: str,
+        error: str | None = None,
     ) -> None:
-        """Persist the outcome of a failed attempt: the next state (pending to retry, or
-        dead), the error, and the attempt count the retry policy decided on."""
-        await self._session.execute(
+        """Fenced state write for the job runner: applies only while `lease_owner` still
+        holds the job. Raises LeaseLost otherwise — a worker whose lease expired must
+        not overwrite the state of a job another worker has since claimed (e.g. turn a
+        COMPLETED job back into DEAD and refund it)."""
+        result = await self._session.execute(
             update(AnalysisJob)
-            .where(AnalysisJob.tenant_id == tenant_id, AnalysisJob.id == job_id)
-            .values(state=state, error=error, attempt=attempts_made)
+            .where(
+                AnalysisJob.tenant_id == tenant_id,
+                AnalysisJob.id == job_id,
+                AnalysisJob.lease_owner == lease_owner,
+            )
+            .values(state=state, error=error)
         )
+        if result.rowcount != 1:  # type: ignore[attr-defined]
+            raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
 
     async def record_usage(
         self,

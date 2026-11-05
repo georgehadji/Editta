@@ -22,10 +22,13 @@ class LLMClient(Protocol):
 class JobQueue(Protocol):
     async def claim(self, *, worker_id: str, lease_seconds: int) -> ClaimedJob | None: ...
     async def heartbeat(self, job_id: UUID, worker_id: str, *, lease_seconds: int) -> None: ...
-    async def release(self, job_id: UUID) -> None: ...
+    async def release(self, job_id: UUID, worker_id: str) -> None:
+        """No-op unless `worker_id` still holds the lease (fenced)."""
+        ...
 
-    async def defer(self, job_id: UUID, *, delay_seconds: int) -> None:
-        """Release the lease but keep the job unclaimable until the delay elapses."""
+    async def defer(self, job_id: UUID, worker_id: str, *, delay_seconds: int) -> None:
+        """Release the lease but keep the job unclaimable until the delay elapses.
+        No-op unless `worker_id` still holds the lease (fenced)."""
         ...
 
 

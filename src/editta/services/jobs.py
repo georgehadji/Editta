@@ -14,8 +14,15 @@ DEAD + refund) atomically -> commit. A retried job resumes from its checkpoints.
 
 Credits: reserved once per job (idempotency key), refunded only when the job dies.
 A retry reuses the original reservation; a completed job keeps it.
+
+Fencing: every job-state write is conditional on this run's `lease_owner` still
+holding the job (`set_state_if_owned`). If the lease was lost — the worker stalled
+past expiry and another worker claimed the job — the write raises LeaseLost, the
+step's transaction rolls back, and this run abandons the job without recording or
+refunding anything; the new owner's outcome is the one that counts.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
@@ -33,7 +40,7 @@ from editta.adapters.persistence.repositories import (
     PassResultRepository,
     ReportRepository,
 )
-from editta.domain.errors import EdittaError
+from editta.domain.errors import EdittaError, LeaseLost
 from editta.domain.models import (
     ClaimedJob,
     Finding,
@@ -45,7 +52,7 @@ from editta.domain.models import (
 )
 from editta.domain.ports import BlobStore, LLMClient
 from editta.domain.report import assemble_report
-from editta.domain.states import JobState, decide_after_failure
+from editta.domain.states import JobState, attempts_exhausted, decide_after_failure
 from editta.services.analysis import ANALYSIS_PASSES, preflight, run_passes, run_synthesis
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +71,9 @@ class JobRepositories:
 
 # Opens one tenant-scoped transaction; commits on clean exit, rolls back on error.
 JobUnitOfWork = Callable[[], AbstractAsyncContextManager[JobRepositories]]
+
+
+SYNTHESIS_CHECKPOINT = "synthesis"
 
 
 def _pass_checkpoint_key(job_id: UUID, pass_name: str) -> str:
@@ -106,13 +116,29 @@ class JobRunner:
         self._job_cost_credits = job_cost_credits
 
     async def run(self, job: ClaimedJob) -> JobOutcome:
+        if attempts_exhausted(job.attempt):
+            # Earlier attempts ended without recording anything (crash, OOM, lost
+            # lease) — the claim counted them anyway. Stop instead of looping forever.
+            return await self._dead_letter(
+                job, f"gave up after {job.attempt - 1} attempts that did not finish"
+            )
         try:
             await self._execute(job)
+        except LeaseLost as exc:
+            return self._abandon(job, exc)
         except Exception as exc:  # classified, recorded and returned — never swallowed
-            return await self._handle_failure(job, exc)
+            try:
+                return await self._handle_failure(job, exc)
+            except LeaseLost as lost:
+                return self._abandon(job, lost)
         return JobOutcome.completed()
 
     # --- happy path -------------------------------------------------------------
+
+    async def _set_state(self, repos: JobRepositories, job: ClaimedJob, state: JobState) -> None:
+        await repos.jobs.set_state_if_owned(
+            job.tenant_id, job.job_id, lease_owner=job.lease_owner, state=state
+        )
 
     async def _execute(self, job: ClaimedJob) -> None:
         # Own transaction: the reservation must survive a failure in any later step,
@@ -121,26 +147,31 @@ class JobRunner:
             await self._reserve_credit_once(repos, job)
 
         async with self._uow() as repos:
-            await repos.jobs.update_state(job.tenant_id, job.job_id, state=JobState.PARSING)
+            await self._set_state(repos, job, JobState.PARSING)
             record = await repos.manuscripts.get_by_id(job.tenant_id, job.manuscript_id)
             if record is None:
                 raise EdittaError(f"manuscript {job.manuscript_id} not found")
             blob_key, title = record.blob_key, record.title
 
         data = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
-        manuscript = parse_manuscript(data, title)
+        # CPU-bound and attacker-influenced (a crafted PDF can take minutes): off the
+        # event loop, so heartbeats keep the lease alive while it runs.
+        manuscript = await asyncio.to_thread(parse_manuscript, data, title)
 
         async with self._uow() as repos:
-            await repos.jobs.update_state(job.tenant_id, job.job_id, state=JobState.ANALYZING)
+            await self._set_state(repos, job, JobState.ANALYZING)
             done = {r.pass_name for r in await repos.pass_results.list_for_job(job.job_id)}
 
         missing = [p for p in ANALYSIS_PASSES if p.name not in done]
-        await preflight(
-            self._llm,
-            manuscript,
-            analysis_passes_remaining=len(missing),
-            cost_ceiling_usd=self._cost_ceiling_usd,
-        )
+        synthesis_done = SYNTHESIS_CHECKPOINT in done
+        if missing or not synthesis_done:
+            await preflight(
+                self._llm,
+                manuscript,
+                analysis_passes_remaining=len(missing),
+                include_synthesis=not synthesis_done,
+                cost_ceiling_usd=self._cost_ceiling_usd,
+            )
 
         async def checkpoint(result: PassResult) -> None:
             await self._checkpoint(job, result)
@@ -149,18 +180,23 @@ class JobRunner:
         pass_results = [await self._load_checkpoint(job.job_id, p.name) for p in ANALYSIS_PASSES]
 
         async with self._uow() as repos:
-            await repos.jobs.update_state(job.tenant_id, job.job_id, state=JobState.SYNTHESIZING)
-        synthesis = await run_synthesis(manuscript, pass_results, self._llm)
+            await self._set_state(repos, job, JobState.SYNTHESIZING)
+        if synthesis_done:
+            synthesis = await self._load_synthesis(job.job_id)
+        else:
+            synthesis = await run_synthesis(manuscript, pass_results, self._llm)
+            await self._checkpoint_synthesis(job, synthesis)
 
         async with self._uow() as repos:
-            await repos.jobs.update_state(job.tenant_id, job.job_id, state=JobState.EXPORTING)
+            await self._set_state(repos, job, JobState.EXPORTING)
         report_key = await self._export_report(job.job_id, manuscript, pass_results, synthesis)
 
         # Report row + COMPLETED commit together: a report never exists for a job that
-        # isn't complete, and a complete job always has its report.
+        # isn't complete, and a complete job always has its report. Fenced: if the lease
+        # was lost, the transaction rolls back and the report row is not created.
         async with self._uow() as repos:
             await repos.reports.create(job_id=job.job_id, blob_key=report_key)
-            await repos.jobs.update_state(job.tenant_id, job.job_id, state=JobState.COMPLETED)
+            await self._set_state(repos, job, JobState.COMPLETED)
 
     async def _reserve_credit_once(self, repos: JobRepositories, job: ClaimedJob) -> None:
         # A retry finds the first attempt's reservation and appends nothing.
@@ -196,6 +232,26 @@ class JobRunner:
                 cache_read_tokens=result.usage.cache_read_tokens,
             )
 
+    async def _checkpoint_synthesis(self, job: ClaimedJob, synthesis: SynthesisReport) -> None:
+        """Synthesis is the most expensive call (uncached manuscript); checkpointing it
+        means an export or commit failure never pays for it twice."""
+        blob_key = _pass_checkpoint_key(job.job_id, SYNTHESIS_CHECKPOINT)
+        payload = synthesis.model_dump_json().encode("utf-8")
+        await self._blobs.put(blob_key, _single_chunk(payload))
+        async with self._uow() as repos:
+            await repos.pass_results.upsert(
+                job_id=job.job_id,
+                pass_name=SYNTHESIS_CHECKPOINT,
+                blob_key=blob_key,
+                model="",
+                usage={},
+            )
+
+    async def _load_synthesis(self, job_id: UUID) -> SynthesisReport:
+        blob_key = _pass_checkpoint_key(job_id, SYNTHESIS_CHECKPOINT)
+        raw = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
+        return SynthesisReport.model_validate_json(raw)
+
     async def _load_checkpoint(self, job_id: UUID, pass_name: str) -> PassResult:
         async with self._uow() as repos:
             records = await repos.pass_results.list_for_job(job_id)
@@ -223,33 +279,48 @@ class JobRunner:
             synthesis=synthesis,
         )
         blob_key = _report_key(job_id)
-        await self._blobs.put(blob_key, _single_chunk(ReportDocxBuilder(report).build()))
+        docx_bytes = await asyncio.to_thread(ReportDocxBuilder(report).build)
+        await self._blobs.put(blob_key, _single_chunk(docx_bytes))
         return blob_key
 
     # --- failure path -----------------------------------------------------------
 
     async def _handle_failure(self, job: ClaimedJob, exc: Exception) -> JobOutcome:
         retryable = exc.retryable if isinstance(exc, EdittaError) else True
-        decision = decide_after_failure(previous_attempts=job.attempt, retryable=retryable)
+        decision = decide_after_failure(attempts_made=job.attempt, retryable=retryable)
         error = _error_message(exc)
         log = logger.bind(job_id=str(job.job_id), tenant_id=str(job.tenant_id))
         if isinstance(exc, EdittaError):
-            log.warning("job.attempt_failed", error=error, attempts=decision.attempts_made)
+            log.warning("job.attempt_failed", error=error, attempt=job.attempt)
         else:
-            log.exception("job.attempt_crashed", attempts=decision.attempts_made)
+            log.exception("job.attempt_crashed", attempt=job.attempt)
 
-        # The decision, the error and (if terminal) the refund commit together.
+        if decision.retry_after_seconds is None:  # terminal: retrying cannot help
+            return await self._dead_letter(job, error)
         async with self._uow() as repos:
-            await repos.jobs.record_failure(
+            await repos.jobs.set_state_if_owned(
                 job.tenant_id,
                 job.job_id,
+                lease_owner=job.lease_owner,
                 state=decision.next_state,
                 error=error,
-                attempts_made=decision.attempts_made,
+            )
+        return JobOutcome.retry(error=error, after_seconds=decision.retry_after_seconds)
+
+    async def _dead_letter(self, job: ClaimedJob, error: str) -> JobOutcome:
+        # DEAD and the refund commit together, fenced: a worker that lost the job can
+        # neither kill it nor refund it.
+        async with self._uow() as repos:
+            await repos.jobs.set_state_if_owned(
+                job.tenant_id,
+                job.job_id,
+                lease_owner=job.lease_owner,
+                state=JobState.DEAD,
+                error=error,
             )
             # Refund only what was actually reserved — a job that died before its
             # reservation committed must not mint a credit.
-            if decision.is_terminal and await repos.ledger.has_entry(f"job:{job.job_id}:reserve"):
+            if await repos.ledger.has_entry(f"job:{job.job_id}:reserve"):
                 await repos.ledger.append_once(
                     tenant_id=job.tenant_id,
                     delta=self._job_cost_credits,
@@ -257,7 +328,8 @@ class JobRunner:
                     idempotency_key=f"job:{job.job_id}:refund",
                     job_id=job.job_id,
                 )
+        return JobOutcome.dead(error=error)
 
-        if decision.retry_after_seconds is None:
-            return JobOutcome.dead(error=error)
-        return JobOutcome.retry(error=error, after_seconds=decision.retry_after_seconds)
+    def _abandon(self, job: ClaimedJob, exc: LeaseLost) -> JobOutcome:
+        logger.warning("job.lease_lost", job_id=str(job.job_id), worker=job.lease_owner)
+        return JobOutcome.abandoned(error=str(exc))

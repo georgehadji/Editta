@@ -24,6 +24,18 @@ class LLMError(EdittaError):
     retryable: ClassVar[bool] = True
 
 
+class LLMRequestRejected(LLMError):
+    """The provider rejected the request itself (4xx: invalid params, auth, too large).
+    Deterministic — retrying the same request fails the same way."""
+
+    retryable: ClassVar[bool] = False
+
+
+class LeaseLost(EdittaError):
+    """This worker no longer owns the job (its lease expired and another worker claimed
+    it). Not a job failure: the runner stops writing and records nothing."""
+
+
 class BudgetExceeded(EdittaError):
     """Projected job cost exceeds the configured ceiling. Deterministic for a given input."""
 
