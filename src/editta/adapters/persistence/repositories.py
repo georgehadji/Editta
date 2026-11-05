@@ -21,7 +21,7 @@ from editta.adapters.persistence.tables import (
     Tenant,
     User,
 )
-from editta.domain.errors import LeaseLost
+from editta.domain.errors import EdittaError, LeaseLost
 
 MANUSCRIPT_PURGED = "purged"
 
@@ -59,9 +59,17 @@ class UserRepository:
         self._session = session
 
     async def create(self, *, tenant_id: UUID, email: str, role: str = "editor") -> User:
-        user = User(id=uuid4(), tenant_id=tenant_id, email=email, role=role)
-        self._session.add(user)
-        await self._session.flush()
+        """Idempotent on (tenant_id, email): two concurrent invites of one address both
+        succeed and return the same user. ON CONFLICT DO NOTHING for the reason given in
+        CreditLedgerRepository.append_once: a caught IntegrityError aborts the transaction."""
+        await self._session.execute(
+            pg_insert(User)
+            .values(id=uuid4(), tenant_id=tenant_id, email=email, role=role)
+            .on_conflict_do_nothing(index_elements=[User.tenant_id, User.email])
+        )
+        user = await self.get_by_email(tenant_id, email)
+        if user is None:  # unreachable: inserted here, or by the transaction we raced
+            raise EdittaError("user missing right after insert")
         return user
 
     async def get_by_email(self, tenant_id: UUID, email: str) -> User | None:

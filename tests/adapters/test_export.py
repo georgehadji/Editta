@@ -2,8 +2,10 @@ import io
 from datetime import UTC, datetime
 
 import docx
+import pytest
 
 from editta.adapters.export.docx_builder import ReportDocxBuilder
+from editta.adapters.parsing import parse_manuscript
 from editta.domain.models import (
     Finding,
     LLMUsage,
@@ -13,6 +15,9 @@ from editta.domain.models import (
     SynthesisReport,
     SynthesisSection,
 )
+from editta.services.pipeline import run_pipeline
+from tests.adapters.pdf_factory import text_pdf
+from tests.fakes import FakeLLMClient
 
 FINDING = Finding(
     section="intro",
@@ -50,3 +55,17 @@ def test_build_produces_valid_docx_with_no_score_or_verdict_text() -> None:
     assert "a real quote" in full_text
     for banned in ("recommendation:", "verdict:", "score:", "accept", "reject"):
         assert banned not in full_text
+
+
+@pytest.mark.asyncio
+async def test_report_for_a_pdf_with_control_characters_exports() -> None:
+    """Regression (hunt D1): a control character in the PDF reached a quoted finding and
+    made python-docx raise 'All strings must be XML compatible'."""
+    pdf = text_pdf([["Broken\x01font words here and more text follows after that point."]])
+    llm = FakeLLMClient(manuscript_text=parse_manuscript(pdf, "a.pdf").text)
+
+    report = await run_pipeline(
+        manuscript_bytes=pdf, filename="a.pdf", llm=llm, cost_ceiling_usd=6.0
+    )
+
+    assert ReportDocxBuilder(report).build()

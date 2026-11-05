@@ -21,6 +21,10 @@ from editta.domain.models import ManuscriptText
 MAX_PDF_PAGES = 2_000
 MAX_EXTRACTED_CHARS = 5_000_000  # ~1M words: far past any essay/book manuscript
 
+# Characters XML 1.0 forbids. Broken font maps put them in extracted text; they would
+# otherwise reach the prompts, be quoted back, and make the DOCX export raise.
+_XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
 _INLINE_WHITESPACE = re.compile(r"[ \t ]+")
 
 
@@ -48,7 +52,7 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
         except Exception as exc:
             raise ParseError(f"failed to extract text from PDF page {index + 1}: {exc}") from exc
         for raw_line in page_text.splitlines():
-            line = _INLINE_WHITESPACE.sub(" ", raw_line).strip()
+            line = _INLINE_WHITESPACE.sub(" ", _XML_FORBIDDEN.sub("", raw_line)).strip()
             if not line:
                 continue
             total_chars += len(line)
