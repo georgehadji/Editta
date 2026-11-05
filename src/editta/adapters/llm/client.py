@@ -9,12 +9,12 @@
 import asyncio
 from typing import Final, Literal, TypeVar, cast, get_args
 
-from anthropic import APIStatusError, AsyncAnthropic
+from anthropic import APIStatusError, AsyncAnthropic, transform_schema
 from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from editta.adapters.llm.resilience import CircuitBreaker, TokenBucket
-from editta.domain.errors import LLMError, LLMRequestRejected
+from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, LLMRequestRejected
 from editta.domain.models import CachePolicy, LLMResult, LLMUsage, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
@@ -49,12 +49,24 @@ def _messages(parts: PromptParts, cache: CachePolicy) -> list[MessageParam]:
 # say nothing about provider health, so they neither retry nor trip the breaker.
 # (408 timeout, 409, 429 rate limit and 5xx/529 overload stay retryable.)
 _NON_RETRYABLE_STATUSES: Final = frozenset({400, 401, 403, 404, 413, 422})
+# Anthropic says "max_tokens", OpenAI-style APIs say "length".
+_CUT_OFF_REASONS: Final = frozenset({"max_tokens", "length"})
 
 
 def _output_config(effort: str) -> OutputConfigParam:
     if effort not in _EFFORTS:
         raise LLMRequestRejected(f"unsupported effort level: {effort!r}")
     return {"effort": cast(Effort, effort)}
+
+
+def output_error(stop_reason: str | None, usage: LLMUsage) -> LLMError:
+    """The error for an answer that does not fit the schema. The message names the stop
+    reason only: model output can quote the manuscript and ends up in job records."""
+    if stop_reason in _CUT_OFF_REASONS:
+        return LLMOutputTruncated(f"model output was cut off (stop: {stop_reason})", usage=usage)
+    return LLMOutputInvalid(
+        f"model returned no structured output (stop: {stop_reason})", usage=usage
+    )
 
 
 def _is_rejection(exc: Exception) -> bool:
@@ -95,7 +107,12 @@ class AnthropicLLMClient:
         model: str,
         fallbacks: tuple[str, ...] = (),  # Anthropic-only: nothing to fall back to
     ) -> LLMResult[T]:
-        output_config = _output_config(effort)
+        # The schema goes in output_config, not output_format: the SDK would parse the answer
+        # mid-stream, before the stop reason and final token usage have arrived.
+        output_config: OutputConfigParam = {
+            **_output_config(effort),
+            "format": {"type": "json_schema", "schema": transform_schema(schema)},
+        }
         self._breaker.before_call()
         async with self._semaphore:
             await self._bucket.acquire()
@@ -109,10 +126,9 @@ class AnthropicLLMClient:
                     messages=_messages(parts, cache),
                     # Fixed for every call: the thinking config is part of the cache key
                     # (see passes/base.py), so it must never vary between passes.
-                    # For the same reason passes must share one `output_format`.
+                    # For the same reason passes must share one output schema.
                     thinking={"type": "adaptive"},
                     output_config=output_config,
-                    output_format=schema,
                 ) as stream:
                     message = await stream.get_final_message()
             except Exception as exc:
@@ -120,19 +136,19 @@ class AnthropicLLMClient:
                     raise LLMRequestRejected(f"LLM request rejected: {exc}") from exc
                 self._breaker.record_failure()
                 raise LLMError(f"LLM call failed: {exc}") from exc
+        # The provider answered, so a bad answer is not a provider-health failure.
         self._breaker.record_success()
-        if message.parsed_output is None:
-            # A refusal or a max_tokens cut-off yields no parseable output. Retryable:
-            # adaptive thinking length varies between attempts.
-            raise LLMError(f"model returned no structured output (stop: {message.stop_reason})")
         usage = message.usage
-        return LLMResult(
-            output=message.parsed_output,
-            usage=LLMUsage(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
-                cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
-            ),
-            model=model,
+        llm_usage = LLMUsage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
         )
+        text = "".join(block.text for block in message.content if block.type == "text")
+        try:
+            output = schema.model_validate_json(text)
+        except ValidationError:
+            # `from None`: pydantic's message quotes the invalid input, i.e. the manuscript.
+            raise output_error(message.stop_reason, llm_usage) from None
+        return LLMResult(output=output, usage=llm_usage, model=model)

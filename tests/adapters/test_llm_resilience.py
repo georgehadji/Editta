@@ -38,6 +38,30 @@ def test_circuit_breaker_half_open_probe_allowed_after_cooldown() -> None:
     breaker.before_call()  # cooldown elapsed instantly (0.0s) — probe allowed through
 
 
+def test_circuit_breaker_half_open_admits_one_probe_then_closes_on_success() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60.0)
+    breaker.record_failure()
+    breaker._opened_at = time.monotonic() - 61  # cooldown over
+
+    breaker.before_call()  # the probe
+    with pytest.raises(LLMError, match="circuit breaker open"):
+        breaker.before_call()  # a second caller waits for the probe's result
+
+    breaker.record_success()
+    breaker.before_call()
+    breaker.before_call()
+
+
+def test_circuit_breaker_lost_probe_is_replaced_after_another_cooldown() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60.0)
+    breaker.record_failure()
+    breaker._opened_at = time.monotonic() - 61
+    breaker.before_call()  # probe that never reports back (cancelled)
+
+    breaker._opened_at = time.monotonic() - 61
+    breaker.before_call()  # a new probe is allowed
+
+
 def test_default_cooldown_matches_plan() -> None:
     assert COOLDOWN_SECONDS == 60.0
 

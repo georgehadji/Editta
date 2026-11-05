@@ -24,7 +24,8 @@ class CircuitBreaker:
             return
         if time.monotonic() - self._opened_at < self.cooldown_seconds:
             raise LLMError("circuit breaker open: LLM provider failing repeatedly")
-        # cooldown elapsed: allow exactly one half-open probe through without resetting state
+        # Half-open: this call is the probe; everyone else waits another cooldown for its result.
+        self._opened_at = time.monotonic()
 
     def record_success(self) -> None:
         self._consecutive_failures = 0

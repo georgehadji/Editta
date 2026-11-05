@@ -12,6 +12,9 @@ Now, per step: transition state -> commit; checkpoint each pass the moment it
 finishes -> commit; on failure, record the policy's decision (retry with backoff, or
 DEAD + refund) atomically -> commit. A retried job resumes from its checkpoints.
 
+Cost: the usage of failed-but-billed LLM calls is recorded as they fail
+(`_RecordFailedSpend`); a cut-off answer is not retried.
+
 Credits: reserved at upload (services/uploads.py), refunded only when the job dies.
 The runner's own reservation is an idempotent fallback for jobs queued before upload-
 time reservation existed; for every other job it finds the key and appends nothing.
@@ -25,12 +28,14 @@ refunding anything; the new owner's outcome is the one that counts.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import TypeVar
 from uuid import UUID
 
 import structlog
+from pydantic import BaseModel
 
 from editta.adapters.export.docx_builder import ReportDocxBuilder
 from editta.adapters.parsing import parse_manuscript
@@ -42,14 +47,17 @@ from editta.adapters.persistence.repositories import (
     ReportRepository,
 )
 from editta.domain.credits import refund_key, reservation_key
-from editta.domain.errors import EdittaError, LeaseLost
+from editta.domain.errors import EdittaError, LeaseLost, LLMError
 from editta.domain.models import (
+    CachePolicy,
     ClaimedJob,
     Finding,
     JobOutcome,
+    LLMResult,
     LLMUsage,
     ManuscriptText,
     PassResult,
+    PromptParts,
     SynthesisReport,
 )
 from editta.domain.ports import BlobStore, LLMClient
@@ -58,6 +66,40 @@ from editta.domain.states import JobState, attempts_exhausted, decide_after_fail
 from editta.services.analysis import ANALYSIS_PASSES, preflight, run_passes, run_synthesis
 
 logger = structlog.get_logger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class _RecordFailedSpend:
+    """LLMClient decorator. A call that fails after the model answered (cut off, wrong
+    shape) is still billed, so its usage is recorded before the error propagates.
+    Successful calls are recorded with their checkpoint, so nothing is counted twice."""
+
+    def __init__(self, inner: LLMClient, record: Callable[[LLMUsage], Awaitable[None]]) -> None:
+        self._inner = inner
+        self._record = record
+
+    async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
+        return await self._inner.count_tokens(parts, model=model)
+
+    async def analyze(
+        self,
+        parts: PromptParts,
+        schema: type[T],
+        *,
+        cache: CachePolicy,
+        effort: str,
+        model: str,
+        fallbacks: tuple[str, ...] = (),
+    ) -> LLMResult[T]:
+        try:
+            return await self._inner.analyze(
+                parts, schema, cache=cache, effort=effort, model=model, fallbacks=fallbacks
+            )
+        except LLMError as exc:
+            if exc.usage is not None:
+                await self._record(exc.usage)
+            raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +184,22 @@ class JobRunner:
             job.tenant_id, job.job_id, lease_owner=job.lease_owner, state=state
         )
 
+    async def _record_usage(self, job: ClaimedJob, usage: LLMUsage) -> None:
+        # Bookkeeping must not change the job's fate: log a failed write, keep the error.
+        try:
+            async with self._uow() as repos:
+                await repos.jobs.record_usage(
+                    job.tenant_id,
+                    job.job_id,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                )
+        except Exception:
+            logger.exception("worker.failed_spend_unrecorded", job_id=str(job.job_id))
+
     async def _execute(self, job: ClaimedJob) -> None:
+        llm = _RecordFailedSpend(self._llm, lambda usage: self._record_usage(job, usage))
         # Own transaction: the reservation must survive a failure in any later step,
         # because the failure path refunds against it.
         async with self._uow() as repos:
@@ -170,7 +227,7 @@ class JobRunner:
         synthesis_done = SYNTHESIS_CHECKPOINT in done
         if missing or not synthesis_done:
             await preflight(
-                self._llm,
+                llm,
                 manuscript,
                 analysis_passes=missing,
                 include_synthesis=not synthesis_done,
@@ -180,7 +237,7 @@ class JobRunner:
         async def checkpoint(result: PassResult) -> None:
             await self._checkpoint(job, result)
 
-        await run_passes(missing, manuscript, self._llm, on_pass_completed=checkpoint)
+        await run_passes(missing, manuscript, llm, on_pass_completed=checkpoint)
         pass_results = [await self._load_checkpoint(job.job_id, p.name) for p in ANALYSIS_PASSES]
 
         async with self._uow() as repos:
@@ -188,7 +245,7 @@ class JobRunner:
         if synthesis_done:
             synthesis = await self._load_synthesis(job.job_id)
         else:
-            synthesis = await run_synthesis(manuscript, pass_results, self._llm)
+            synthesis = await run_synthesis(manuscript, pass_results, llm)
             await self._checkpoint_synthesis(job, synthesis)
 
         async with self._uow() as repos:

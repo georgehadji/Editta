@@ -4,6 +4,8 @@ import os
 
 import pytest
 
+from editta.config import Settings
+
 _REQUIRED_ENV = {
     "EDITTA_DATABASE_URL": "postgresql+asyncpg://editta:editta@localhost:5432/editta",
     "EDITTA_ANTHROPIC_API_KEY": "test-key",
@@ -17,6 +19,9 @@ _REQUIRED_ENV = {
 
 @pytest.fixture(autouse=True)
 def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A developer's real .env and shell must not decide what a test sees.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    for key in [k for k in os.environ if k.startswith("EDITTA_")]:
+        monkeypatch.delenv(key)
     for key, value in _REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
-    os.environ.pop("EDITTA_ENVIRONMENT", None)

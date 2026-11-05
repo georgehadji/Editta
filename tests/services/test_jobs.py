@@ -5,8 +5,8 @@ from uuid import uuid4
 import docx
 import pytest
 
-from editta.domain.errors import LLMError, ParseError
-from editta.domain.models import CachePolicy, ClaimedJob, JobOutcomeKind, PromptParts
+from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, ParseError
+from editta.domain.models import CachePolicy, ClaimedJob, JobOutcomeKind, LLMUsage, PromptParts
 from editta.domain.states import JobState, retry_delay_seconds
 from editta.services.jobs import JobRunner, _pass_checkpoint_key
 from tests.fakes import FailureRule, FakeLLMClient
@@ -213,6 +213,68 @@ async def test_retryable_failure_on_last_attempt_goes_dead_and_refunds() -> None
 
     assert outcome.kind is JobOutcomeKind.DEAD
     assert h.ledger("refund") == [1]
+
+
+_CUT_OFF = LLMUsage(input_tokens=700, output_tokens=64_000, cache_read_tokens=300)
+
+
+@pytest.mark.asyncio
+async def test_cut_off_answer_is_not_retried_is_refunded_and_its_spend_is_recorded() -> None:
+    llm = FakeLLMClient(
+        manuscript_text=MANUSCRIPT_TEXT,
+        fail_when=_fail_pass("Analyze language", LLMOutputTruncated("cut off", usage=_CUT_OFF)),
+    )
+    h = Harness(llm=llm)
+
+    outcome = await h.runner.run(h.claimed(attempt=1))
+
+    assert outcome.kind is JobOutcomeKind.DEAD  # first attempt: a retry would be pointless
+    assert h.ledger("refund") == [1]
+    assert h.job.cost_output_tokens >= 64_000  # type: ignore[attr-defined]
+    assert h.job.cache_read_tokens >= 300  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_invalid_answer_is_retried_and_its_spend_is_recorded() -> None:
+    llm = FakeLLMClient(
+        manuscript_text=MANUSCRIPT_TEXT,
+        fail_when=_fail_pass("Analyze language", LLMOutputInvalid("bad", usage=_CUT_OFF)),
+    )
+    h = Harness(llm=llm)
+
+    outcome = await h.runner.run(h.claimed(attempt=1))
+
+    assert outcome.kind is JobOutcomeKind.RETRY
+    assert h.job.cost_output_tokens >= 64_000  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_every_failed_call_is_billed_even_though_one_error_propagates() -> None:
+    # Language (Opus) and metadata (Haiku) run as parallel groups; both fail.
+    def rule(parts: PromptParts) -> BaseException | None:
+        if parts.instructions.startswith(("Analyze language", "Analyze metadata")):
+            return LLMOutputInvalid("bad", usage=LLMUsage(input_tokens=1, output_tokens=1_000))
+        return None
+
+    h = Harness(llm=FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT, fail_when=rule))
+
+    await h.runner.run(h.claimed(attempt=1))
+
+    # Two failed calls at 1 000 tokens each, not just the one error that propagates.
+    assert h.job.cost_output_tokens >= 2_000  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_failure_without_usage_records_nothing_extra() -> None:
+    llm = FakeLLMClient(
+        manuscript_text=MANUSCRIPT_TEXT,
+        fail_when=_fail_pass("Analyze language", LLMError("overloaded")),
+    )
+    h = Harness(llm=llm)
+
+    await h.runner.run(h.claimed(attempt=1))
+
+    assert h.job.cost_output_tokens <= 3 * 50  # type: ignore[attr-defined]  # siblings only
 
 
 @pytest.mark.asyncio
