@@ -324,3 +324,46 @@ def test_factory_prefers_openrouter_and_keeps_anthropic_for_counting() -> None:
     assert isinstance(anthropic_only, AnthropicLLMClient)
     with pytest.raises(ValueError):
         build_llm_client(anthropic_api_key=None, openrouter_api_key=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_after", ["Wed, 21 Oct 2026 07:28:00 GMT", "soon"])
+async def test_non_numeric_retry_after_falls_back_to_backoff(
+    monkeypatch: pytest.MonkeyPatch, retry_after: str
+) -> None:
+    """RFC 9110 allows an HTTP-date; float() on it must not escape as a bare ValueError."""
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", record_sleep)
+    responses = iter(
+        [httpx.Response(429, headers={"retry-after": retry_after}), _ok(FINDINGS.model_dump_json())]
+    )
+    client = _client(lambda request: next(responses))
+
+    result = await client.analyze(
+        PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS
+    )
+
+    assert result.output == FINDINGS
+    assert slept == [1.0]  # 2 ** attempt 0
+
+
+@pytest.mark.asyncio
+async def test_numeric_retry_after_is_still_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", record_sleep)
+    responses = iter(
+        [httpx.Response(429, headers={"retry-after": "7"}), _ok(FINDINGS.model_dump_json())]
+    )
+    client = _client(lambda request: next(responses))
+
+    await client.analyze(PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS)
+
+    assert slept == [7.0]

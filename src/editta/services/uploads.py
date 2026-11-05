@@ -80,25 +80,27 @@ async def submit_manuscript(
         if not await tenants.lock(tenant_id):
             raise EdittaError(f"tenant {tenant_id} not found")
         require_credits(await ledger.balance(tenant_id), job_cost_credits)
-    except EdittaError:
-        await blobs.delete_prefix(blob_key)  # refused: keep nothing of the manuscript
+        manuscript = await manuscripts.create(
+            tenant_id=tenant_id,
+            title=title,
+            blob_key=blob_key,
+            sha256=hashlib.sha256(data).hexdigest(),
+            retention_until=(now or datetime.now(UTC)) + timedelta(days=retention_days),
+        )
+        job = await jobs.create(tenant_id=tenant_id, manuscript_id=manuscript.id)
+        await ledger.append_once(
+            tenant_id=tenant_id,
+            delta=-job_cost_credits,
+            reason="job",
+            idempotency_key=reservation_key(job.id),
+            job_id=job.id,
+        )
+        await audit.append(
+            tenant_id=tenant_id, actor=actor, action="upload", subject=str(manuscript.id)
+        )
+    except Exception:
+        # Refused or failed: no row will point at the blob, so the retention sweep could
+        # never delete it. Keep nothing of the manuscript.
+        await blobs.delete_prefix(blob_key)
         raise
-    manuscript = await manuscripts.create(
-        tenant_id=tenant_id,
-        title=title,
-        blob_key=blob_key,
-        sha256=hashlib.sha256(data).hexdigest(),
-        retention_until=(now or datetime.now(UTC)) + timedelta(days=retention_days),
-    )
-    job = await jobs.create(tenant_id=tenant_id, manuscript_id=manuscript.id)
-    await ledger.append_once(
-        tenant_id=tenant_id,
-        delta=-job_cost_credits,
-        reason="job",
-        idempotency_key=reservation_key(job.id),
-        job_id=job.id,
-    )
-    await audit.append(
-        tenant_id=tenant_id, actor=actor, action="upload", subject=str(manuscript.id)
-    )
     return SubmittedManuscript(manuscript_id=manuscript.id, job_id=job.id)
