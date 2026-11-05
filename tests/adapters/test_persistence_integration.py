@@ -662,3 +662,48 @@ async def test_retention_purges_an_analysed_manuscript_on_real_db(
         assert manuscript is not None and manuscript.status == "purged"
         assert await PassResultRepository(session).list_for_job(job_id) == []
         assert await ReportRepository(session).get_by_job_id(job_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_invites_of_one_email_both_succeed_with_the_same_user(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Regression (hunt D3): the loser of the race raised IntegrityError (an HTTP 500)
+    although the user existed — 100 failures in 100 trials before the fix."""
+    async with pg_worker_factory() as session:
+        tenant_id = (await TenantRepository(session).create(name="Tenant")).id
+        await session.commit()
+    uow = UnitOfWork(pg_session_factory)
+
+    @asynccontextmanager
+    async def users(tid: UUID) -> AsyncIterator[UserRepository]:
+        async with uow.begin(tid) as session:
+            yield UserRepository(session)
+
+    accounts = AccountService(users=users, session_secret="secret")  # noqa: S106
+
+    for i in range(20):
+        email = f"person{i}@example.com"
+        first, second = await asyncio.gather(
+            accounts.provision_user(tenant_id=tenant_id, email=email),
+            accounts.provision_user(tenant_id=tenant_id, email=email),
+        )
+        assert first.user_id == second.user_id
+
+
+@pytest.mark.asyncio
+async def test_inviting_different_emails_still_creates_separate_users(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with pg_worker_factory() as session:
+        tenant_id = (await TenantRepository(session).create(name="Tenant")).id
+        await session.commit()
+    uow = UnitOfWork(pg_session_factory)
+
+    async with uow.begin(tenant_id) as session:
+        repo = UserRepository(session)
+        a = await repo.create(tenant_id=tenant_id, email="a@example.com", role="admin")
+        b = await repo.create(tenant_id=tenant_id, email="b@example.com")
+        assert a.id != b.id and (a.role, b.role) == ("admin", "editor")

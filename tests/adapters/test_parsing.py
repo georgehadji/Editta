@@ -173,3 +173,16 @@ def test_sanitize_filename(raw: str, expected: str) -> None:
 def test_sanitize_filename_caps_length_and_keeps_extension() -> None:
     cleaned = sanitize_filename("α" * 500 + ".docx")
     assert len(cleaned) == 200 and cleaned.endswith(".docx")
+
+
+def test_pdf_text_has_no_xml_forbidden_characters() -> None:
+    """Broken font maps yield control characters; the DOCX export (XML 1.0) rejects them."""
+    pdf = text_pdf([["Broken\x01font \x00words plain here\x1f."]])
+
+    assert parse_manuscript(pdf, "essay.pdf").text == "Brokenfont words plain here."
+
+
+def test_pdf_control_character_filter_keeps_ordinary_whitespace_and_text() -> None:
+    text = parse_manuscript(text_pdf([["one\ttwo"], ["three"]]), "essay.pdf").text
+
+    assert text == "one two\nthree"
