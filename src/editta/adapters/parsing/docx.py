@@ -4,20 +4,14 @@ import io
 
 import docx
 
-from editta.adapters.parsing.safety import validate_upload
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
 
 _HEADING_PREFIX = "Heading"
 
 
-def parse_docx(data: bytes, filename: str) -> ManuscriptText:
-    validate_upload(data, filename)
-    return extract_docx(data, filename)
-
-
 def extract_docx(data: bytes, filename: str) -> ManuscriptText:
-    """Extraction only. Callers must have run validate_upload (parse_docx does)."""
+    """Extraction only. Callers must have run validate_upload (parse_manuscript does)."""
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:

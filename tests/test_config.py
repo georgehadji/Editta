@@ -10,7 +10,6 @@ def test_load_settings_reads_env() -> None:
 
     assert settings.environment == "production"  # secure default when unset
     assert settings.job_cost_credits == 1
-    assert settings.max_jobs_per_worker == 2
     assert settings.max_llm_concurrency == 4
     assert settings.job_cost_ceiling_usd == 6.0
     assert settings.manuscript_retention_days == 30

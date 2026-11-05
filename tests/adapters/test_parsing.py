@@ -6,8 +6,6 @@ import pytest
 
 from editta.adapters.parsing import EXTRACTORS, parse_manuscript
 from editta.adapters.parsing import pdf as pdf_module
-from editta.adapters.parsing.docx import parse_docx
-from editta.adapters.parsing.pdf import parse_pdf
 from editta.adapters.parsing.safety import (
     MAX_UPLOAD_BYTES,
     ManuscriptFormat,
@@ -79,7 +77,7 @@ def test_validate_upload_rejects_unsupported_extension() -> None:
 def test_parse_docx_extracts_text_and_sections() -> None:
     data = _build_docx_bytes(["first paragraph", "second paragraph"], heading="Chapter One")
 
-    manuscript = parse_docx(data, "essay.docx")
+    manuscript = parse_manuscript(data, "essay.docx")
 
     assert "first paragraph" in manuscript.text
     assert "second paragraph" in manuscript.text
@@ -89,7 +87,7 @@ def test_parse_docx_extracts_text_and_sections() -> None:
 
 def test_parse_docx_rejects_empty_document() -> None:
     with pytest.raises(ParseError, match="no extractable text"):
-        parse_docx(_build_docx_bytes([]), "essay.docx")
+        parse_manuscript(_build_docx_bytes([]), "essay.docx")
 
 
 # --- format dispatch, PDF, filename sanitizing --------------------------------------
@@ -121,39 +119,39 @@ def test_parse_manuscript_dispatches_docx_to_the_docx_extractor() -> None:
 def test_parse_pdf_reads_sections_from_outline() -> None:
     pdf = with_outline(text_pdf([["Intro text."], ["Body text."]]), ["Intro", "Body"])
 
-    assert parse_pdf(pdf, "essay.pdf").sections == ("Intro", "Body")
+    assert parse_manuscript(pdf, "essay.pdf").sections == ("Intro", "Body")
 
 
 def test_parse_pdf_collapses_inline_whitespace() -> None:
     pdf = text_pdf([["spaced    out     words"]])
-    assert parse_pdf(pdf, "essay.pdf").text == "spaced out words"
+    assert parse_manuscript(pdf, "essay.pdf").text == "spaced out words"
 
 
 def test_parse_pdf_rejects_image_only_pdf() -> None:
     with pytest.raises(ParseError, match="no extractable text"):
-        parse_pdf(text_pdf([[]]), "scan.pdf")
+        parse_manuscript(text_pdf([[]]), "scan.pdf")
 
 
 def test_parse_pdf_rejects_encrypted_pdf() -> None:
     with pytest.raises(ParseError, match="encrypted"):
-        parse_pdf(encrypted(text_pdf([["secret"]])), "locked.pdf")
+        parse_manuscript(encrypted(text_pdf([["secret"]])), "locked.pdf")
 
 
 def test_parse_pdf_rejects_garbage_after_magic() -> None:
     with pytest.raises(ParseError, match="failed to"):
-        parse_pdf(b"%PDF-1.4 this is not a pdf body", "broken.pdf")
+        parse_manuscript(b"%PDF-1.4 this is not a pdf body", "broken.pdf")
 
 
 def test_parse_pdf_enforces_page_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pdf_module, "MAX_PDF_PAGES", 1)
     with pytest.raises(ParseError, match="pages"):
-        parse_pdf(text_pdf([["a"], ["b"]]), "long.pdf")
+        parse_manuscript(text_pdf([["a"], ["b"]]), "long.pdf")
 
 
 def test_parse_pdf_enforces_extracted_text_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pdf_module, "MAX_EXTRACTED_CHARS", 10)
     with pytest.raises(ParseError, match="maximum extractable size"):
-        parse_pdf(text_pdf([["more than ten characters"]]), "big.pdf")
+        parse_manuscript(text_pdf([["more than ten characters"]]), "big.pdf")
 
 
 @pytest.mark.parametrize(

@@ -48,13 +48,14 @@ from editta.api.deps import (
 )
 from editta.api.middleware import new_csrf_cookie_value, verify_csrf
 from editta.config import Settings
-from editta.domain.errors import InsufficientCredits, ParseError
+from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore, EmailSender
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
     AccountService,
     InvalidMagicLink,
 )
+from editta.services.reports import report_download
 from editta.services.uploads import submit_manuscript
 
 # Signed-in pages: session cookie + double-submit CSRF header on every mutation.
@@ -331,14 +332,16 @@ async def download_report(
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
 ) -> RedirectResponse:
     _require_matching_tenant(auth, tenant_id)
-    job = await jobs.get_by_id(tenant_id, job_id)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-    report = await reports.get_by_job_id(job_id)
-    if report is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "report not ready")
-    url = await blobs.presigned_get_url(report.blob_key, expires_in=3600)
-    await audit.append(
-        tenant_id=tenant_id, actor=auth.email, action="download", subject=str(report.id)
-    )
-    return RedirectResponse(url)
+    try:
+        download = await report_download(
+            tenant_id=tenant_id,
+            job_id=job_id,
+            actor=auth.email,
+            jobs=jobs,
+            reports=reports,
+            audit=audit,
+            blobs=blobs,
+        )
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return RedirectResponse(download.url)
