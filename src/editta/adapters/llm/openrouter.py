@@ -14,6 +14,7 @@ manuscripts), and responses are streamed: long non-streamed calls get disconnect
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 from typing import Any, Final, TypeVar
@@ -228,7 +229,8 @@ class OpenRouterLLMClient:
                         error = LLMError(f"OpenRouter provider error: {body['error']}")
                     else:
                         error = LLMError(f"OpenRouter call failed ({response.status_code})")
-                        delay = float(response.headers.get("retry-after") or delay)
+                        with contextlib.suppress(ValueError):  # HTTP-date: keep the backoff
+                            delay = float(response.headers.get("retry-after") or delay)
             except httpx.HTTPError as exc:
                 error = LLMError(f"OpenRouter call failed: {exc}")
             except json.JSONDecodeError:

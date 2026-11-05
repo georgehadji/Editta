@@ -123,3 +123,34 @@ async def test_upload_reserves_the_credit_under_the_tenant_lock() -> None:
     assert await deps.ledger.balance(TENANT) == 0
     with pytest.raises(InsufficientCredits):  # the last credit is spent
         await deps.submit(_docx(), "essay.docx")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("part", "method"),
+    [
+        ("tenants", "lock"),
+        ("ledger", "balance"),
+        ("manuscripts", "create"),
+        ("jobs", "create"),
+        ("ledger", "append_once"),
+        ("audit", "append"),
+    ],
+)
+async def test_unexpected_failure_after_the_blob_is_stored_leaves_no_blob(
+    monkeypatch: pytest.MonkeyPatch, part: str, method: str
+) -> None:
+    """The blob is written before the database work. If that work dies (not merely
+    refuses), no row will ever point at the blob, so the retention sweep could never
+    delete the manuscript."""
+    deps = Deps()
+
+    async def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(getattr(deps, part), method, boom)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await deps.submit(_docx(), "essay.docx")
+
+    assert deps.blobs._data == {}  # the DB rows roll back with the transaction
