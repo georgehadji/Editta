@@ -23,6 +23,7 @@ class _ManuscriptRecord:
         self.blob_key = blob_key
         self.title = title
         self.retention_until = retention_until
+        self.status = "uploaded"
 
 
 class FakeManuscriptRepo:
@@ -60,12 +61,14 @@ class FakeManuscriptRepo:
 
     async def list_expired(self, before: Any) -> list[_ManuscriptRecord]:
         return [
-            r for r in self._records.values() if r.retention_until and r.retention_until < before
+            r
+            for r in self._records.values()
+            if r.retention_until and r.retention_until < before and r.status != "purged"
         ]
 
-    async def delete(self, manuscript: _ManuscriptRecord) -> None:
-        key = next(k for k, v in self._records.items() if v is manuscript)
-        del self._records[key]
+    async def mark_purged(self, tenant_id: UUID, manuscript_id: UUID) -> None:
+        record = self._records[(tenant_id, manuscript_id)]
+        record.status, record.blob_key = "purged", ""
 
 
 class _JobRecord:
@@ -94,6 +97,13 @@ class FakeAnalysisJobRepo:
 
     async def get_by_id(self, tenant_id: UUID, job_id: UUID) -> _JobRecord | None:
         return self._records.get((tenant_id, job_id))
+
+    async def list_ids_for_manuscript(self, tenant_id: UUID, manuscript_id: UUID) -> list[UUID]:
+        return [
+            r.id
+            for (t, _), r in self._records.items()
+            if t == tenant_id and r.manuscript_id == manuscript_id
+        ]
 
     async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[_JobRecord]:
         return [r for (t, _), r in self._records.items() if t == tenant_id][:limit]
@@ -177,6 +187,9 @@ class FakePassResultRepo:
         self._rows.append(row)
         return row
 
+    async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
+        self._rows = [r for r in self._rows if r.job_id not in job_ids]
+
     async def list_for_job(self, job_id: UUID) -> list[_PassResultRecord]:
         return [r for r in self._rows if r.job_id == job_id]
 
@@ -209,6 +222,7 @@ class FakeLedgerRepo:
     def __init__(self) -> None:
         self.entries: list[dict[str, Any]] = []
         self._seen_keys: set[str] = set()
+        self._deltas: dict[str, int] = {}
 
     async def append_once(
         self,
@@ -223,11 +237,15 @@ class FakeLedgerRepo:
         if idempotency_key in self._seen_keys:
             return False
         self._seen_keys.add(idempotency_key)
+        self._deltas[idempotency_key] = delta
         self.entries.append({"tenant_id": tenant_id, "delta": delta, "reason": reason})
         return True
 
     async def has_entry(self, idempotency_key: str) -> bool:
         return idempotency_key in self._seen_keys
+
+    async def entry_delta(self, idempotency_key: str) -> int | None:
+        return self._deltas.get(idempotency_key)
 
     async def balance(self, tenant_id: UUID) -> int:
         return sum(e["delta"] for e in self.entries if e["tenant_id"] == tenant_id)

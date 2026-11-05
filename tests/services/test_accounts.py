@@ -11,12 +11,7 @@ from editta.services.accounts import (
     InvalidMagicLink,
     InvalidSession,
 )
-from tests.services.fakes import (
-    FakeTenantRepo,
-    FakeUserRepo,
-    RecordingEmailSender,
-    make_account_service,
-)
+from tests.services.fakes import FakeTenantRepo, FakeUserRepo, make_account_service
 
 SECRET = "test-secret"  # noqa: S105 -- test fixture, not a real secret
 BASE_URL = "https://editta.test"
@@ -93,31 +88,43 @@ def test_session_cookie_rejects_tampered_token() -> None:
 
 
 @pytest.mark.asyncio
-async def test_login_for_an_unknown_email_sends_nothing_and_creates_nothing() -> None:
+async def test_login_for_an_unknown_email_yields_nothing_and_creates_nothing() -> None:
     """Regression: any email used to be auto-created as an editor of any tenant."""
-    users, sender, tenant_id = FakeUserRepo(), RecordingEmailSender(), uuid4()
+    users, tenant_id = FakeUserRepo(), uuid4()
 
-    link = await _service(users).request_login(
-        tenant_id=tenant_id, email="attacker@evil.test", sender=sender, base_url=BASE_URL
+    login = await _service(users).request_login(
+        tenant_id=tenant_id, email="attacker@example.org", base_url=BASE_URL
     )
 
-    assert link is None
-    assert sender.sent == []
-    assert await users.get_by_email(tenant_id, "attacker@evil.test") is None
+    assert login is None
+    assert await users.get_by_email(tenant_id, "attacker@example.org") is None
 
 
 @pytest.mark.asyncio
-async def test_login_emails_an_existing_user_and_the_link_signs_them_in() -> None:
+async def test_login_link_for_an_existing_user_signs_them_in() -> None:
     service, _, tenant_id = await _with_user()
-    sender = RecordingEmailSender()
 
-    await service.request_login(
-        tenant_id=tenant_id, email=" Editor@Example.com ", sender=sender, base_url=BASE_URL
+    login = await service.request_login(
+        tenant_id=tenant_id, email=" Editor@Example.com ", base_url=BASE_URL
     )
-    user = await service.complete_login(sender.last_token_for("editor@example.com"))
+    assert login is not None
+    user = await service.complete_login(login.url.split("token=", 1)[1])
 
-    assert sender.sent[0][1].startswith(f"{BASE_URL}/t/{tenant_id}/auth/click?token=")
+    assert login.to_email == "editor@example.com"
+    assert login.url.startswith(f"{BASE_URL}/t/{tenant_id}/auth/click?token=")
     assert (user.tenant_id, user.email, user.role) == (tenant_id, "editor@example.com", "editor")
+
+
+def test_rate_limit_subject_requires_a_validly_signed_cookie() -> None:
+    from editta.services.accounts import session_rate_limit_subject
+
+    service = _service()
+    user_id = uuid4()
+    cookie = service.issue_session_cookie(tenant_id=uuid4(), user_id=user_id, email="e@x.com")
+
+    assert session_rate_limit_subject(cookie, SECRET) == str(user_id)
+    assert session_rate_limit_subject("made-up-cookie", SECRET) is None
+    assert session_rate_limit_subject(cookie, "another-secret") is None
 
 
 @pytest.mark.asyncio

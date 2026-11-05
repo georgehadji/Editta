@@ -28,6 +28,7 @@ from editta.adapters.persistence.repositories import (
     PassResultRepository,
     ReportRepository,
 )
+from editta.adapters.persistence.roles import require_rls_bypass
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import DEFAULT_LEASE_SECONDS, PostgresJobQueue
 from editta.adapters.storage.s3 import S3BlobStore
@@ -89,6 +90,7 @@ class Worker:
         self._shutdown.set()
 
     async def run_forever(self) -> None:
+        await require_rls_bypass(self._queue_engine, purpose="the job queue")
         logger.info("worker.started", worker_id=self._worker_id)
         while not self._shutdown.is_set():
             claimed = await self._claim_one()

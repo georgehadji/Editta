@@ -153,6 +153,8 @@ class JobRunner:
             record = await repos.manuscripts.get_by_id(job.tenant_id, job.manuscript_id)
             if record is None:
                 raise EdittaError(f"manuscript {job.manuscript_id} not found")
+            if not record.blob_key:  # purged by retention (services/retention.py)
+                raise EdittaError("manuscript content was deleted by the retention policy")
             blob_key, title = record.blob_key, record.title
 
         data = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
@@ -320,12 +322,14 @@ class JobRunner:
                 state=JobState.DEAD,
                 error=error,
             )
-            # Refund only what was actually reserved — a job that died before its
-            # reservation committed must not mint a credit.
-            if await repos.ledger.has_entry(reservation_key(job.job_id)):
+            # Refund exactly what was reserved: nothing if the job died before its
+            # reservation committed (no minted credit), and the reserved amount — not
+            # today's price — if the price changed since the upload.
+            reserved = await repos.ledger.entry_delta(reservation_key(job.job_id))
+            if reserved is not None and reserved < 0:
                 await repos.ledger.append_once(
                     tenant_id=job.tenant_id,
-                    delta=self._job_cost_credits,
+                    delta=-reserved,
                     reason="refund",
                     idempotency_key=refund_key(job.job_id),
                     job_id=job.job_id,

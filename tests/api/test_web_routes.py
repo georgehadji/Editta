@@ -6,6 +6,7 @@ tests/api/test_routes_contract.py, so no Postgres/S3/Stripe/SMTP is needed.
 
 import asyncio
 import io
+import re
 from uuid import uuid4
 
 import docx
@@ -100,11 +101,25 @@ def production_client():  # noqa: ANN201
     app.dependency_overrides.clear()
 
 
+def _emailed_link(client: TestClient, email: str = EDITOR) -> str:
+    page = client.post(f"/t/{TENANT_ID}/login", data={"email": email})
+    start = page.text.index("/t/", page.text.index("auth/click") - 40)
+    return page.text[start : page.text.index('"', start)].replace("&amp;", "&")
+
+
+def _confirm(client: TestClient, link: str):  # noqa: ANN202
+    page = client.get(link)
+    token = re.search(r'name="token" value="([^"]+)"', page.text).group(1)  # type: ignore[union-attr]
+    nonce = re.search(r'name="nonce" value="([^"]+)"', page.text).group(1)  # type: ignore[union-attr]
+    return client.post(
+        f"/t/{TENANT_ID}/auth/click",
+        data={"token": token, "nonce": nonce},
+        follow_redirects=True,
+    )
+
+
 def _sign_in(client: TestClient) -> None:
-    check_email = client.post(f"/t/{TENANT_ID}/login", data={"email": EDITOR})
-    link_start = check_email.text.index("/t/", check_email.text.index("auth/click") - 40)
-    link_end = check_email.text.index('"', link_start)
-    client.get(check_email.text[link_start:link_end], follow_redirects=True)
+    assert _confirm(client, _emailed_link(client)).status_code == 200
 
 
 def test_login_page_renders(client: TestClient) -> None:
@@ -119,13 +134,11 @@ def test_full_login_upload_flow_unassisted(client: TestClient) -> None:
     assert EDITOR in check_email.text
     # Development + console sender: the link is shown instead of emailed.
     assert "auth/click?token=" in check_email.text
-    link_start = check_email.text.index("/t/", check_email.text.index("auth/click") - 40)
-    link_end = check_email.text.index('"', link_start)
-    click_path = check_email.text[link_start:link_end]
 
-    dashboard = client.get(click_path, follow_redirects=True)
+    dashboard = _confirm(client, _emailed_link(client))
     assert dashboard.status_code == 200
     assert "3 credits" in dashboard.text
+    assert f"Signed in as <strong>{EDITOR}</strong>" in dashboard.text
 
     csrf = client.cookies.get("editta_csrf")
     upload = client.post(
@@ -136,6 +149,74 @@ def test_full_login_upload_flow_unassisted(client: TestClient) -> None:
     assert upload.status_code == 200
     assert "essay.docx" not in upload.text  # job list shows manuscript_id, not filename
     assert "pending" in upload.text
+
+
+def test_opening_the_link_alone_does_not_sign_in(client: TestClient) -> None:
+    """Regression: a bare GET signed the browser in, so an attacker could send a victim
+    the attacker's own link and swap the victim's session for theirs."""
+    page = client.get(_emailed_link(client))
+
+    assert page.status_code == 200
+    assert f"Sign in as {EDITOR}" in page.text
+    assert client.cookies.get("editta_session") is None
+
+
+def test_confirming_without_the_nonce_cookie_is_refused(client: TestClient) -> None:
+    """What a cross-site auto-submitting form would send: a valid token, but no
+    nonce cookie (a third-party page can neither read nor set it)."""
+    link = _emailed_link(client)
+    token = link.split("token=", 1)[1]
+
+    response = client.post(f"/t/{TENANT_ID}/auth/click", data={"token": token, "nonce": "guessed"})
+
+    assert response.status_code == 403
+    assert client.cookies.get("editta_session") is None
+
+
+def test_a_leftover_session_cookie_does_not_block_signing_in(client: TestClient) -> None:
+    """Regression: the sign-in form sends no CSRF header, so anyone with an old
+    session cookie got a 403 when asking for a link."""
+    response = client.post(
+        f"/t/{TENANT_ID}/login",
+        data={"email": EDITOR},
+        headers={"Cookie": "editta_session=stale-or-revoked"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_sign_out_clears_the_session(client: TestClient) -> None:
+    _sign_in(client)
+
+    response = client.post(
+        f"/t/{TENANT_ID}/logout",
+        headers={"X-CSRF-Token": client.cookies.get("editta_csrf"), "HX-Request": "true"},
+    )
+
+    assert response.status_code == 204
+    assert response.headers["HX-Redirect"] == f"/t/{TENANT_ID}/login"
+    assert client.get(f"/t/{TENANT_ID}/dashboard").status_code == 401
+
+
+def test_refused_upload_is_shown_to_htmx_users(client: TestClient) -> None:
+    """htmx ignores 4xx responses, so a 402 used to change nothing on screen."""
+    _sign_in(client)
+    for _ in range(3):  # spend the 3 seeded credits
+        client.post(
+            f"/t/{TENANT_ID}/upload",
+            files={"file": ("essay.docx", _docx_bytes())},
+            headers={"X-CSRF-Token": client.cookies.get("editta_csrf")},
+        )
+
+    refused = client.post(
+        f"/t/{TENANT_ID}/upload",
+        files={"file": ("essay.docx", _docx_bytes())},
+        headers={"X-CSRF-Token": client.cookies.get("editta_csrf"), "HX-Request": "true"},
+    )
+
+    assert refused.status_code == 200
+    assert refused.headers["HX-Retarget"] == "#upload-error"
+    assert "not enough credits" in refused.text and "buy credits" in refused.text
 
 
 def test_billing_checkout_redirects_to_stripe(client: TestClient) -> None:

@@ -3,11 +3,22 @@ because there's no cross-tenant "log in by email alone" resolution built yet —
 tenant admin shares this tenant-specific login URL with their editors directly.
 """
 
+import hmac
+import secrets
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from editta.adapters.email.console import ConsoleEmailSender
@@ -46,7 +57,33 @@ from editta.services.accounts import (
 )
 from editta.services.uploads import submit_manuscript
 
+# Signed-in pages: session cookie + double-submit CSRF header on every mutation.
 router = APIRouter(dependencies=[Depends(verify_csrf)])
+# Sign-in pages run before a session exists, so the session CSRF check does not fit
+# them: a leftover cookie from an old session used to 403 the sign-in form. They are
+# protected on their own terms — requesting a link only ever emails an existing
+# account, and confirming one requires the login nonce (see confirm_login).
+public_router = APIRouter()
+
+LOGIN_NONCE_COOKIE = "editta_login_nonce"
+LOGIN_NONCE_MAX_AGE_SECONDS = 15 * 60
+
+
+def _upload_error(
+    request: Request, templates: Jinja2Templates, *, message: str, status_code: int
+) -> HTMLResponse:
+    """htmx does not swap 4xx responses, so a refused upload used to change nothing on
+    the page. For htmx requests, answer 200 with an error fragment retargeted above the
+    form (HX-Retarget / HX-Reswap); plain clients keep the real 402/422 status."""
+    response = templates.TemplateResponse(
+        request, "_upload_error.html", {"message": message, "payment_required": status_code == 402}
+    )
+    if request.headers.get("HX-Request") == "true":
+        response.headers["HX-Retarget"] = "#upload-error"
+        response.headers["HX-Reswap"] = "innerHTML"
+    else:
+        response.status_code = status_code
+    return response
 
 
 def _require_matching_tenant(auth: AuthContext, tenant_id: UUID) -> None:
@@ -54,7 +91,7 @@ def _require_matching_tenant(auth: AuthContext, tenant_id: UUID) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "wrong tenant")
 
 
-@router.get("/t/{tenant_id}/login", response_class=HTMLResponse)
+@public_router.get("/t/{tenant_id}/login", response_class=HTMLResponse)
 async def login_page(
     request: Request,
     tenant_id: UUID,
@@ -63,9 +100,10 @@ async def login_page(
     return templates.TemplateResponse(request, "login.html", {"tenant_id": tenant_id})
 
 
-@router.post("/t/{tenant_id}/login", response_class=HTMLResponse)
+@public_router.post("/t/{tenant_id}/login", response_class=HTMLResponse)
 async def request_login_link(
     request: Request,
+    background: BackgroundTasks,
     tenant_id: UUID,
     email: Annotated[str, Form()],
     account_service: Annotated[AccountService, Depends(get_account_service)],
@@ -75,9 +113,14 @@ async def request_login_link(
 ) -> HTMLResponse:
     # Invite-only: a link is emailed only if this email already has an account here,
     # and the page reads the same either way (no account enumeration).
-    link_url = await account_service.request_login(
-        tenant_id=tenant_id, email=email, sender=email_sender, base_url=settings.app_base_url
+    login = await account_service.request_login(
+        tenant_id=tenant_id, email=email, base_url=settings.app_base_url
     )
+    if login is not None:  # sent after responding: no timing difference to observe
+        background.add_task(
+            email_sender.send_magic_link, to_email=login.to_email, link_url=login.url
+        )
+    link_url = login.url if login is not None else None
     # Local development only: show the link instead of making you read the console.
     # Never in any other environment — a displayed link bypasses proof of the inbox.
     show_dev_link = settings.environment == "development" and isinstance(
@@ -89,12 +132,59 @@ async def request_login_link(
     )
 
 
-@router.get("/t/{tenant_id}/auth/click")
-async def verify_login_link(
+@public_router.get("/t/{tenant_id}/auth/click", response_class=HTMLResponse)
+async def confirm_login_page(
+    request: Request,
     tenant_id: UUID,
     token: str,
     account_service: Annotated[AccountService, Depends(get_account_service)],
+    templates: Annotated[Jinja2Templates, Depends(get_templates)],
+) -> HTMLResponse:
+    """Opening the emailed link does not sign anyone in; it shows who would be signed
+    in, to which tenant, and asks to confirm.
+
+    Signing in on a bare GET let an attacker send a victim *the attacker's own* fresh
+    link: one click silently replaced the victim's session with the attacker's, and
+    the victim's next upload — a confidential manuscript — landed in the attacker's
+    tenant. It also let mail scanners that pre-open links consume them. The nonce
+    cookie set here must accompany the confirming POST, which a third-party page
+    cannot read or set, so a cross-site form cannot complete a login either.
+    """
+    try:
+        user = await account_service.complete_login(token, expected_tenant_id=tenant_id)
+    except InvalidMagicLink as exc:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+    nonce = secrets.token_urlsafe(32)
+    response = templates.TemplateResponse(
+        request,
+        "confirm_login.html",
+        {"tenant_id": tenant_id, "email": user.email, "token": token, "nonce": nonce},
+    )
+    response.set_cookie(
+        LOGIN_NONCE_COOKIE,
+        nonce,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=LOGIN_NONCE_MAX_AGE_SECONDS,
+        path=f"/t/{tenant_id}/auth/click",
+    )
+    return response
+
+
+@public_router.post("/t/{tenant_id}/auth/click")
+async def confirm_login(
+    request: Request,
+    tenant_id: UUID,
+    token: Annotated[str, Form()],
+    nonce: Annotated[str, Form()],
+    account_service: Annotated[AccountService, Depends(get_account_service)],
 ) -> RedirectResponse:
+    expected = request.cookies.get(LOGIN_NONCE_COOKIE)
+    if not expected or not hmac.compare_digest(expected, nonce):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "open the sign-in link in this browser, then confirm"
+        )
     try:
         user = await account_service.complete_login(token, expected_tenant_id=tenant_id)
     except InvalidMagicLink as exc:
@@ -103,7 +193,6 @@ async def verify_login_link(
     session_token = account_service.issue_session_cookie(
         tenant_id=tenant_id, user_id=user.user_id, email=user.email
     )
-
     response = RedirectResponse(f"/t/{tenant_id}/dashboard", status_code=status.HTTP_303_SEE_OTHER)
     response.set_cookie(
         SESSION_COOKIE_NAME,
@@ -121,6 +210,27 @@ async def verify_login_link(
         samesite="lax",
         max_age=SESSION_MAX_AGE_SECONDS,
     )
+    response.delete_cookie(LOGIN_NONCE_COOKIE, path=f"/t/{tenant_id}/auth/click")
+    return response
+
+
+@router.post("/t/{tenant_id}/logout")
+async def logout(
+    request: Request,
+    tenant_id: UUID,
+    auth: Annotated[AuthContext, Depends(get_current_auth)],
+) -> Response:
+    """Clears this browser's session. (Sessions are stateless signed cookies; revoking
+    every session of a user means removing the user — see services/accounts.py.)"""
+    login_url = f"/t/{tenant_id}/login"
+    response: Response
+    if request.headers.get("HX-Request") == "true":
+        response = Response(status_code=status.HTTP_204_NO_CONTENT)
+        response.headers["HX-Redirect"] = login_url
+    else:
+        response = RedirectResponse(login_url, status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(SESSION_COOKIE_NAME)
+    response.delete_cookie("editta_csrf")
     return response
 
 
@@ -141,6 +251,7 @@ async def dashboard(
         "dashboard.html",
         {
             "tenant_id": tenant_id,
+            "email": auth.email,
             "jobs": job_list,
             "credit_balance": balance,
             "csrf_token": request.cookies.get("editta_csrf", ""),
@@ -195,10 +306,13 @@ async def upload_via_web(
             retention_days=settings.manuscript_retention_days,
             job_cost_credits=settings.job_cost_credits,
         )
-    except ParseError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    except InsufficientCredits as exc:
-        raise HTTPException(status.HTTP_402_PAYMENT_REQUIRED, str(exc)) from exc
+    except (ParseError, InsufficientCredits) as exc:
+        code = (
+            status.HTTP_402_PAYMENT_REQUIRED
+            if isinstance(exc, InsufficientCredits)
+            else status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+        return _upload_error(request, templates, message=str(exc), status_code=code)
 
     job_list = await jobs.list_for_tenant(tenant_id)
     return templates.TemplateResponse(

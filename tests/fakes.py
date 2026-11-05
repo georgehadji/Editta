@@ -26,7 +26,7 @@ FailureRule = Callable[[PromptParts], BaseException | None]
 class FakeLLMClient:
     """Deterministic LLM fake.
 
-    * Analysis passes return one finding quoting the first 20 chars of the manuscript.
+    * Analysis passes return one finding quoting the manuscript's first four words.
     * Synthesis cites every finding id it was shown in one section, plus any
       `extra_synthesis_ids` (to test that unknown/hallucinated ids are dropped).
     * `fail_when` lets a test make specific calls raise.
@@ -85,7 +85,7 @@ class FakeLLMClient:
     def _finding(self) -> Finding:
         return Finding(
             section="intro",
-            quote=self._manuscript_text[:20],
+            quote=" ".join(self._manuscript_text.split()[:4]),  # whole words, like a model
             issue="fake issue",
             severity=Severity.MINOR,
             suggestion="fake suggestion",

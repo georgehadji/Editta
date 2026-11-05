@@ -2,10 +2,12 @@
 
 Credits are enforced here, at upload, not when the worker starts the job: a tenant
 with too few credits gets InsufficientCredits (HTTP 402) and nothing is stored or
-queued. The tenant row is locked for the rest of the request transaction, so the
-balance check and the reservation are atomic — two concurrent uploads cannot both
-spend the last credit. The reservation uses the same idempotency key the job runner
-refunds against when a job dies.
+queued (the already-stored blob is deleted again). The tenant row is locked for the
+rest of the request transaction, so the balance check and the reservation are atomic —
+two concurrent uploads cannot both spend the last credit. The blob is stored before
+the lock is taken, so the lock is never held across the upload to object storage.
+The reservation uses the same idempotency key the job runner refunds against when a
+job dies.
 
 Shared by the JSON API and the web UI, which previously each carried their own copy.
 Storage keys are opaque UUIDs (PLAN.md §5). The old content-addressed key
@@ -70,12 +72,17 @@ async def submit_manuscript(
     title = sanitize_filename(filename or "manuscript.docx")
     validate_upload(data, title)
 
-    if not await tenants.lock(tenant_id):
-        raise EdittaError(f"tenant {tenant_id} not found")
-    require_credits(await ledger.balance(tenant_id), job_cost_credits)
-
+    # Store first, lock second: the upload to object storage is the slow part, and
+    # the lock should be held for milliseconds, not for the whole transfer.
     blob_key = manuscript_blob_key(tenant_id, uuid4())
     await blobs.put(blob_key, _single_chunk(data))
+    try:
+        if not await tenants.lock(tenant_id):
+            raise EdittaError(f"tenant {tenant_id} not found")
+        require_credits(await ledger.balance(tenant_id), job_cost_credits)
+    except EdittaError:
+        await blobs.delete_prefix(blob_key)  # refused: keep nothing of the manuscript
+        raise
     manuscript = await manuscripts.create(
         tenant_id=tenant_id,
         title=title,

@@ -4,7 +4,7 @@ browser-facing HTML flow). Invite-only: see services/accounts.py for the access 
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 from editta.api.deps import (
     SESSION_COOKIE_NAME,
@@ -39,18 +39,21 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/magic-link", status_code=status.HTTP_202_ACCEPTED)
 async def request_magic_link(
     body: MagicLinkRequest,
+    background: BackgroundTasks,
     account_service: Annotated[AccountService, Depends(get_account_service)],
     email_sender: Annotated[EmailSender, Depends(get_email_sender)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Envelope[MagicLinkRequestResponse]:
     # The link goes to the inbox only — never into this response (that let anyone who
-    # knew a tenant id sign in). Same answer whether or not the account exists.
-    await account_service.request_login(
-        tenant_id=body.tenant_id,
-        email=body.email,
-        sender=email_sender,
-        base_url=settings.app_base_url,
+    # knew a tenant id sign in). Same answer, and the same latency, whether or not the
+    # account exists: the email is sent after the response, in the background.
+    login = await account_service.request_login(
+        tenant_id=body.tenant_id, email=body.email, base_url=settings.app_base_url
     )
+    if login is not None:
+        background.add_task(
+            email_sender.send_magic_link, to_email=login.to_email, link_url=login.url
+        )
     return Envelope.ok(MagicLinkRequestResponse())
 
 

@@ -10,7 +10,8 @@ from fastapi import Header, HTTPException, Request, Response, status
 from slowapi import Limiter
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from editta.api.deps import SESSION_COOKIE_NAME
+from editta.api.deps import SESSION_COOKIE_NAME, get_settings
+from editta.services.accounts import session_rate_limit_subject
 
 
 def new_csrf_cookie_value() -> str:
@@ -34,11 +35,14 @@ _SECURITY_HEADERS = {
 
 
 def _rate_limit_key(request: Request) -> str:
-    # Session cookie doubles as a stable per-tenant key once logged in; unauthenticated
-    # requests (magic-link issuance) fall back to per-IP, same as slowapi's default.
+    # Signed-in users are limited per user; everything else (including sign-in link
+    # requests) per IP. Only a *validly signed* cookie counts: keying on the raw cookie
+    # let a client send a fresh made-up cookie per request and never hit a limit.
     session_cookie = request.cookies.get(SESSION_COOKIE_NAME)
     if session_cookie:
-        return f"session:{session_cookie}"
+        user_id = session_rate_limit_subject(session_cookie, get_settings().session_secret)
+        if user_id is not None:
+            return f"user:{user_id}"
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 

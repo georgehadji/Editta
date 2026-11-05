@@ -28,7 +28,6 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from editta.adapters.persistence.repositories import TenantRepository, UserRepository
 from editta.domain.errors import EdittaError, PermissionDenied
-from editta.domain.ports import EmailSender
 
 MAGIC_LINK_MAX_AGE_SECONDS = 900
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
@@ -49,6 +48,24 @@ class InvalidMagicLink(EdittaError):
 
 class InvalidSession(EdittaError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class LoginLink:
+    to_email: str
+    url: str
+
+
+def session_rate_limit_subject(cookie: str, session_secret: str) -> str | None:
+    """User id from a *validly signed* session cookie, else None. Rate limiting keys on
+    this rather than the raw cookie, which a client can rotate at will to dodge
+    per-IP limits."""
+    serializer = URLSafeTimedSerializer(session_secret, salt=_SESSION_SALT)
+    try:
+        payload = serializer.loads(cookie, max_age=SESSION_MAX_AGE_SECONDS)
+    except BadSignature:  # includes SignatureExpired
+        return None
+    return str(payload.get("user_id")) if isinstance(payload, dict) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,12 +138,15 @@ class AccountService:
     # --- login ----------------------------------------------------------------------
 
     async def request_login(
-        self, *, tenant_id: UUID, email: str, sender: EmailSender, base_url: str
-    ) -> str | None:
-        """Email a sign-in link if this email has an account in this tenant.
+        self, *, tenant_id: UUID, email: str, base_url: str
+    ) -> LoginLink | None:
+        """The sign-in email to send, if this email has an account in this tenant.
 
-        Returns the link (for the dev console sender only — callers must never put it in
-        an HTTP response) or None. Callers respond identically in both cases.
+        Returns it instead of sending it: callers send in the background *after*
+        responding, so a known and an unknown email take the same time and get the same
+        status even when SMTP is slow or down (otherwise response time and 500s on
+        delivery failures revealed which emails have accounts). Callers must never put
+        the link in an HTTP response outside local development.
         """
         email = normalize_email(email)
         async with self._users(tenant_id) as users:
@@ -136,9 +156,7 @@ class AccountService:
         token = str(
             self._magic_link_serializer.dumps({"tenant_id": str(tenant_id), "email": email})
         )
-        link = login_link(base_url, tenant_id, token)
-        await sender.send_magic_link(to_email=email, link_url=link)
-        return link
+        return LoginLink(to_email=email, url=login_link(base_url, tenant_id, token))
 
     async def complete_login(
         self, token: str, *, expected_tenant_id: UUID | None = None

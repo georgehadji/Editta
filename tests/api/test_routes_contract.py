@@ -238,3 +238,38 @@ def test_removed_user_loses_access_on_the_next_request(
     response = client.get(f"/manuscripts/jobs/{uuid4()}")
 
     assert response.status_code == 401
+
+
+def test_smtp_failure_does_not_reveal_that_the_account_exists(harness: Harness) -> None:
+    """Delivery happens after the response: a failing mail server must not turn the
+    answer for a real account into a 500 (unknown emails would still get 202)."""
+
+    class BrokenSender:
+        async def send_magic_link(self, *, to_email: str, link_url: str) -> None:
+            raise ConnectionError("SMTP down")
+
+    asyncio.run(harness.users.create(tenant_id=TENANT_ID, email=EDITOR))
+    app.dependency_overrides[get_account_service] = lambda: harness.account_service
+    app.dependency_overrides[get_email_sender] = BrokenSender
+    try:
+        with TestClient(
+            app, base_url="https://testserver", raise_server_exceptions=False
+        ) as test_client:
+            known = test_client.post(
+                "/auth/magic-link", json={"tenant_id": str(TENANT_ID), "email": EDITOR}
+            )
+            unknown = test_client.post(
+                "/auth/magic-link",
+                json={"tenant_id": str(TENANT_ID), "email": "nobody@example.org"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert (
+        (known.status_code, known.json())
+        == (unknown.status_code, unknown.json())
+        == (
+            202,
+            {"success": True, "data": {"accepted": True}, "error": None, "meta": None},
+        )
+    )

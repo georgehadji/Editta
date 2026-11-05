@@ -1,3 +1,5 @@
+import pytest
+
 from editta.domain.models import Finding, Severity
 from editta.domain.quotes import anchor_findings, is_quote_anchored
 
@@ -63,3 +65,29 @@ def test_decomposed_greek_accents_match_precomposed_text() -> None:
     decomposed = unicodedata.normalize("NFD", "δεύτερο κεφάλαιο υπάρχει ένα")
     assert decomposed != "δεύτερο κεφάλαιο υπάρχει ένα"
     assert is_quote_anchored(decomposed, BOOK)
+
+
+# --- normalization models routinely apply when quoting --------------------------------
+
+GUILLEMETS = "Ο συγγραφέας γράφει: «Η πόλη θυμάται». Μετά προ-\nχωρά — αργά — στο ναι ή στο όχι."
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        '"Η πόλη θυμάται"',  # straight quotes for « »
+        "η πόλη θυμάται",  # case
+        "Η πόλη θυμάται.",  # trailing punctuation the text doesn't have there
+        "προχωρά",  # word re-joined across a PDF line-break hyphen
+        "αργά - στο ναι",  # hyphen for em dash
+        "ναι",  # a word that also occurs inside "είναι"-like words elsewhere
+    ],
+)
+def test_quotes_survive_typical_model_normalization(quote: str) -> None:
+    assert is_quote_anchored(quote, GUILLEMETS + " Είναι σαφές.")
+
+
+def test_dropped_accents_are_not_forgiven_for_short_quotes() -> None:
+    """Accent errors are what Greek typo findings are about; folding them would make a
+    misspelling indistinguishable from the correct word."""
+    assert not is_quote_anchored("Αθηνα", "Ταξίδι στην Αθήνα.")

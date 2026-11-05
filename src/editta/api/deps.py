@@ -117,48 +117,53 @@ async def get_tenant_session(
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     uow: Annotated[UnitOfWork, Depends(get_uow)],
 ) -> AsyncIterator[AsyncSession]:
+    """One tenant-scoped transaction per request. Every repository dependency declares
+    it with scope="function", so the transaction commits when the endpoint returns and
+    *before* the response is sent: a client never receives a job id (or a 201) for a
+    write that then fails to commit. With the default request scope, the commit ran
+    after the response body had already gone out."""
     async with uow.begin(auth.tenant_id) as session:
         yield session
 
 
 def get_manuscript_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> ManuscriptRepository:
     return ManuscriptRepository(session)
 
 
 def get_job_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> AnalysisJobRepository:
     return AnalysisJobRepository(session)
 
 
 def get_pass_result_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> PassResultRepository:
     return PassResultRepository(session)
 
 
 def get_report_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> ReportRepository:
     return ReportRepository(session)
 
 
 def get_ledger_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> CreditLedgerRepository:
     return CreditLedgerRepository(session)
 
 
 def get_audit_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> AuditEventRepository:
     return AuditEventRepository(session)
 
 
 def get_tenant_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session)],
+    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> TenantRepository:
     return TenantRepository(session)
 

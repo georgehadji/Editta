@@ -26,3 +26,40 @@ def test_production_without_smtp_refuses_instead_of_logging_links(
 def test_development_without_smtp_uses_the_console(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EDITTA_ENVIRONMENT", "development")
     assert isinstance(deps.get_email_sender(), ConsoleEmailSender)
+
+
+def test_a_failed_commit_is_an_error_response_not_a_success_already_sent() -> None:
+    """The request transaction must commit *before* the response goes out. Previously
+    (request-scoped dependency) the commit ran after the body was sent, so a client
+    could get a 201 + job id for a write that then failed to commit."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from fastapi.testclient import TestClient
+
+    from editta.api.main import app
+
+    class FailingCommitUow:
+        @asynccontextmanager
+        async def begin(self, tenant_id):  # noqa: ANN001, ANN202
+            job = SimpleNamespace(id=uuid4(), state="pending", error=None)
+
+            async def execute(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+                return SimpleNamespace(scalar_one_or_none=lambda: job)
+
+            yield SimpleNamespace(execute=execute)
+            raise RuntimeError("commit failed")
+
+    tenant_id = uuid4()
+    app.dependency_overrides[deps.get_uow] = FailingCommitUow
+    app.dependency_overrides[deps.get_current_auth] = lambda: deps.AuthContext(
+        tenant_id=tenant_id, user_id=uuid4(), email="e@example.com"
+    )
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(f"/manuscripts/jobs/{uuid4()}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 500  # not the 200 the endpoint itself produced

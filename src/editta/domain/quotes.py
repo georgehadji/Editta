@@ -14,8 +14,12 @@ What "anchored" means: the quote identifies one passage of the manuscript.
     substrings of a book — and a word that occurs 200 times does not locate anything.
     A single misspelled word still anchors, because typos are almost always unique.
 
-Whitespace is collapsed and text NFC-normalized on both sides first: PDF extraction
-breaks lines mid-sentence, and Greek text mixes precomposed and combining accents.
+Both sides are normalized first, folding what models routinely "correct" when they
+quote: NFC (precomposed vs combining accents), whitespace, case, quotation marks
+(« » “ ” „ → "), apostrophes, dashes, words hyphenated across PDF line breaks, and
+punctuation at the quote's edges. Accents are deliberately NOT folded: a missing
+accent is exactly what Greek typo findings point at ("κειμενο" vs "κείμενο"), and
+folding it would turn a unique typo into a common word.
 """
 
 import re
@@ -30,23 +34,57 @@ QUOTE_MATCH_THRESHOLD = 0.9
 FUZZY_MIN_CHARS = 24
 
 _WHITESPACE = re.compile(r"\s+")
+_LINE_BREAK_HYPHEN = re.compile(r"(\w)-\s*\n\s*(\w)")
+_FOLD = str.maketrans(
+    {
+        "«": '"',
+        "»": '"',
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "‛": "'",
+        "`": "'",
+        "‐": "-",
+        "‑": "-",
+        "‒": "-",
+        "–": "-",
+        "—": "-",
+        "―": "-",
+        "−": "-",
+        "\u00a0": " ",
+    }
+)
+# Edge punctuation a quote may gain or lose: Latin and Greek (";" is the Greek question
+# mark, "·" the ano teleia), quotes, ellipsis.
+_EDGE_PUNCTUATION = " .,;:!?·\u0387\"'…()[]-"
 
 
 def normalize_text(text: str) -> str:
-    return _WHITESPACE.sub(" ", unicodedata.normalize("NFC", text)).strip()
+    text = unicodedata.normalize("NFC", text)
+    text = _LINE_BREAK_HYPHEN.sub(r"\1\2", text)
+    text = text.translate(_FOLD).casefold()
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _normalize_quote(quote: str) -> str:
+    return normalize_text(quote).strip(_EDGE_PUNCTUATION)
 
 
 def is_quote_anchored(
     quote: str, source_text: str, *, threshold: float = QUOTE_MATCH_THRESHOLD
 ) -> bool:
-    return _anchored(normalize_text(quote), normalize_text(source_text), threshold)
+    return _anchored(_normalize_quote(quote), normalize_text(source_text), threshold)
 
 
 def anchor_findings(findings: Iterable[Finding], source_text: str) -> list[Finding]:
     """Keep only findings whose quote identifies a passage of the source text."""
     source = normalize_text(source_text)  # once per pass, not once per finding
     return [
-        f for f in findings if _anchored(normalize_text(f.quote), source, QUOTE_MATCH_THRESHOLD)
+        f for f in findings if _anchored(_normalize_quote(f.quote), source, QUOTE_MATCH_THRESHOLD)
     ]
 
 
@@ -54,5 +92,7 @@ def _anchored(quote: str, source: str, threshold: float) -> bool:
     if not quote:
         return False
     if len(quote) < FUZZY_MIN_CHARS:
-        return source.count(quote) == 1
+        # Whole-word occurrences: "ναι" must not count the "ναι" inside "είναι".
+        pattern = rf"(?<!\w){re.escape(quote)}(?!\w)"
+        return len(re.findall(pattern, source)) == 1
     return fuzz.partial_ratio(quote, source) / 100 >= threshold

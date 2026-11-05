@@ -17,7 +17,7 @@ import subprocess
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -37,6 +37,7 @@ from editta.adapters.persistence.repositories import (
     TenantRepository,
     UserRepository,
 )
+from editta.adapters.persistence.roles import MisconfiguredRole, require_rls_bypass
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import PostgresJobQueue
 from editta.adapters.storage.local import LocalBlobStore
@@ -45,10 +46,12 @@ from editta.domain.models import JobOutcomeKind, PromptParts
 from editta.domain.states import JobState
 from editta.services.accounts import AccountService
 from editta.services.jobs import JobRunner
+from editta.services.retention import purge_expired
 from editta.services.uploads import submit_manuscript
 from editta.worker.main import job_unit_of_work
+from editta.worker.retention import retention_unit_of_work
 from tests.fakes import FakeLLMClient
-from tests.services.fakes import FakeBlobStore, RecordingEmailSender
+from tests.services.fakes import FakeBlobStore
 
 
 def _docker_available() -> bool:
@@ -533,24 +536,20 @@ async def test_invite_only_login_works_under_forced_rls(
 ) -> None:
     accounts = _accounts(pg_session_factory)
     admin = await accounts.bootstrap_tenant(name="Εκδόσεις", admin_email="Owner@Polis.gr")
-    inbox = RecordingEmailSender()
 
-    assert (
-        await accounts.request_login(
-            tenant_id=admin.tenant_id, email="stranger@example.org", sender=inbox, base_url="x"
-        )
-        is None
+    stranger = await accounts.request_login(
+        tenant_id=admin.tenant_id, email="stranger@example.org", base_url="x"
     )
-    await accounts.request_login(
-        tenant_id=admin.tenant_id, email="owner@polis.gr", sender=inbox, base_url="x"
+    login = await accounts.request_login(
+        tenant_id=admin.tenant_id, email="owner@polis.gr", base_url="x"
     )
-    user = await accounts.complete_login(inbox.last_token_for("owner@polis.gr"))
+    assert stranger is None and login is not None
+    user = await accounts.complete_login(login.url.split("token=", 1)[1])
     cookie = accounts.issue_session_cookie(
         tenant_id=user.tenant_id, user_id=user.user_id, email=user.email
     )
 
     assert (await accounts.authenticate_session(cookie)).role == "admin"
-    assert [to for to, _ in inbox.sent] == ["owner@polis.gr"]
     async with UnitOfWork(pg_session_factory).begin(admin.tenant_id) as session:
         users = UserRepository(session)
         assert await users.get_by_email(admin.tenant_id, "stranger@example.org") is None
@@ -595,3 +594,63 @@ async def test_concurrent_uploads_cannot_both_spend_the_last_credit(
     assert results == ["accepted", "refused"]
     async with uow.begin(tenant_id) as session:
         assert await CreditLedgerRepository(session).balance(tenant_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_connection_must_bypass_rls(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Under forced RLS a worker on the app role would claim nothing, silently. The
+    startup check makes that misconfiguration an error instead."""
+    app_engine = pg_session_factory.kw["bind"]
+    worker_engine = pg_worker_factory.kw["bind"]
+
+    with pytest.raises(MisconfiguredRole, match="EDITTA_WORKER_DATABASE_URL"):
+        await require_rls_bypass(app_engine, purpose="the job queue")
+    await require_rls_bypass(worker_engine, purpose="the job queue")
+
+    async with pg_session_factory() as session:  # and this is what it would have done
+        assert await PostgresJobQueue(session).claim(worker_id="w") is None
+
+
+@pytest.mark.asyncio
+async def test_retention_purges_an_analysed_manuscript_on_real_db(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Regression: the sweep deleted the manuscript row, which jobs reference, so it
+    failed with a foreign-key violation on every analysed manuscript — after deleting
+    the source file — and never removed the checkpoints that quote the text."""
+    blobs = LocalBlobStore(tmp_path)
+    tenant_id, manuscript_id, job_id = await _seed_job(
+        pg_worker_factory, blob_key="t/manuscripts/m/source", title="essay.docx"
+    )
+    checkpoint = f"jobs/{job_id}/passes/language.json"
+    for key in ("t/manuscripts/m/source", checkpoint, f"jobs/{job_id}/report.docx"):
+        await blobs.put(key, _chunk(b"quoted manuscript text"))
+    uow = UnitOfWork(pg_session_factory)
+    async with uow.begin(tenant_id) as session:
+        await PassResultRepository(session).upsert(
+            job_id=job_id,
+            pass_name="language",  # noqa: S106
+            blob_key=checkpoint,
+            model="m",
+            usage={},
+        )
+        await ReportRepository(session).create(job_id=job_id, blob_key=f"jobs/{job_id}/report.docx")
+
+    result = await purge_expired(
+        retention_unit_of_work(pg_worker_factory), blobs, now=datetime.now(UTC) + timedelta(days=1)
+    )
+
+    assert (result.purged, result.failed) == (1, 0)
+    assert not (tmp_path / "t/manuscripts/m/source").exists()
+    assert not (tmp_path / checkpoint).exists()
+    assert (tmp_path / f"jobs/{job_id}/report.docx").exists()
+    async with uow.begin(tenant_id) as session:
+        manuscript = await ManuscriptRepository(session).get_by_id(tenant_id, manuscript_id)
+        assert manuscript is not None and manuscript.status == "purged"
+        assert await PassResultRepository(session).list_for_job(job_id) == []
+        assert await ReportRepository(session).get_by_job_id(job_id) is not None

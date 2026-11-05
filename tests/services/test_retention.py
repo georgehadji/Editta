@@ -1,53 +1,109 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 
-from editta.worker.retention import run_retention_sweep
-from tests.services.fakes import FakeBlobStore, FakeManuscriptRepo
+from editta.services.jobs import _pass_checkpoint_key, _report_key
+from editta.services.retention import RetentionRepositories, purge_expired
+from tests.services.fakes import (
+    FakeAnalysisJobRepo,
+    FakeBlobStore,
+    FakeManuscriptRepo,
+    FakePassResultRepo,
+    _PassResultRecord,
+)
 
 NOW = datetime(2026, 6, 1, tzinfo=UTC)
 
 
+class World:
+    def __init__(self) -> None:
+        self.manuscripts = FakeManuscriptRepo()
+        self.jobs = FakeAnalysisJobRepo()
+        self.pass_results = FakePassResultRepo()
+        self.blobs = FakeBlobStore()
+
+    def uow(self):  # noqa: ANN201
+        @asynccontextmanager
+        async def unit():  # noqa: ANN202
+            yield RetentionRepositories(
+                manuscripts=self.manuscripts,  # type: ignore[arg-type]
+                jobs=self.jobs,  # type: ignore[arg-type]
+                pass_results=self.pass_results,  # type: ignore[arg-type]
+            )
+
+        return unit
+
+    def analysed_manuscript(self, *, expires: datetime) -> tuple:  # type: ignore[type-arg]
+        tenant_id, manuscript_id = uuid4(), uuid4()
+        source = f"{tenant_id}/manuscripts/{manuscript_id}/source"
+        self.manuscripts.seed(
+            tenant_id, manuscript_id, blob_key=source, title="t", retention_until=expires
+        )
+        job = self.jobs.seed(tenant_id, uuid4(), manuscript_id, lease_owner=None)
+        checkpoint = _pass_checkpoint_key(job.id, "language")
+        synthesis = _pass_checkpoint_key(job.id, "synthesis")
+        report = _report_key(job.id)
+        for key in (source, checkpoint, synthesis, report):
+            self.blobs.seed(key, b"quotes from the manuscript")
+        self.pass_results.seed(_PassResultRecord(job.id, "language", checkpoint, "m", {}))
+        return tenant_id, manuscript_id, job.id, source, checkpoint, synthesis, report
+
+
 @pytest.mark.asyncio
-async def test_sweep_deletes_only_expired_manuscripts() -> None:
-    manuscripts = FakeManuscriptRepo()
-    blobs = FakeBlobStore()
-
-    expired_id, fresh_id = uuid4(), uuid4()
-    manuscripts.seed(
-        uuid4(),
-        expired_id,
-        blob_key="a/expired.docx",
-        title="expired",
-        retention_until=NOW - timedelta(days=1),
+async def test_purge_removes_source_and_checkpoints_but_keeps_report_and_record() -> None:
+    world = World()
+    tenant_id, manuscript_id, job_id, source, checkpoint, synthesis, report = (
+        world.analysed_manuscript(expires=NOW - timedelta(days=1))
     )
-    manuscripts.seed(
-        uuid4(),
-        fresh_id,
-        blob_key="b/fresh.docx",
-        title="fresh",
-        retention_until=NOW + timedelta(days=1),
-    )
-    blobs.seed("a/expired.docx", b"x")
-    blobs.seed("b/fresh.docx", b"y")
 
-    deleted = await run_retention_sweep(manuscripts, blobs, now=NOW)
+    result = await purge_expired(world.uow(), world.blobs, now=NOW)
 
-    assert deleted == 1
-    assert len(manuscripts._records) == 1
-    assert "b/fresh.docx" in blobs._data
-    assert "a/expired.docx" not in blobs._data
+    assert (result.purged, result.failed) == (1, 0)
+    assert source not in world.blobs._data
+    assert checkpoint not in world.blobs._data and synthesis not in world.blobs._data
+    assert report in world.blobs._data  # reports are kept until the tenant deletes them
+    assert await world.pass_results.list_for_job(job_id) == []
+    record = await world.manuscripts.get_by_id(tenant_id, manuscript_id)
+    assert record is not None and record.status == "purged" and record.blob_key == ""
 
 
 @pytest.mark.asyncio
-async def test_sweep_is_noop_when_nothing_expired() -> None:
-    manuscripts = FakeManuscriptRepo()
-    blobs = FakeBlobStore()
-    manuscripts.seed(
-        uuid4(), uuid4(), blob_key="a.docx", title="a", retention_until=NOW + timedelta(days=30)
-    )
+async def test_unexpired_manuscripts_are_untouched_and_purge_is_idempotent() -> None:
+    world = World()
+    world.analysed_manuscript(expires=NOW - timedelta(days=1))
+    *_, fresh_source, _, _, _ = world.analysed_manuscript(expires=NOW + timedelta(days=1))
 
-    deleted = await run_retention_sweep(manuscripts, blobs, now=NOW)
+    first = await purge_expired(world.uow(), world.blobs, now=NOW)
+    second = await purge_expired(world.uow(), world.blobs, now=NOW)
 
-    assert deleted == 0
+    assert (first.purged, second.purged) == (1, 0)
+    assert fresh_source in world.blobs._data
+
+
+@pytest.mark.asyncio
+async def test_a_failure_leaves_the_manuscript_for_the_next_sweep() -> None:
+    """Storage first, record last: a failure must never mark content purged that
+    still exists."""
+
+    class FlakyBlobs(FakeBlobStore):
+        fail = True
+
+        async def delete_prefix(self, prefix: str) -> None:
+            if self.fail and "/passes/" in prefix:
+                raise OSError("object store unavailable")
+            await super().delete_prefix(prefix)
+
+    world = World()
+    world.blobs = FlakyBlobs()
+    tenant_id, manuscript_id, *_ = world.analysed_manuscript(expires=NOW - timedelta(days=1))
+
+    failed = await purge_expired(world.uow(), world.blobs, now=NOW)
+    world.blobs.fail = False  # type: ignore[attr-defined]
+    retried = await purge_expired(world.uow(), world.blobs, now=NOW)
+
+    assert (failed.purged, failed.failed) == (0, 1)
+    assert retried.purged == 1
+    record = await world.manuscripts.get_by_id(tenant_id, manuscript_id)
+    assert record is not None and record.status == "purged"
