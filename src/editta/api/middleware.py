@@ -1,5 +1,5 @@
-"""CSRF, rate limiting, security headers. Log-scrubbing lives in the structlog
-processor chain configured in api/main.py, not here.
+"""CSRF, rate limiting, security headers, request-size cap. Log-scrubbing lives in the
+structlog processor chain configured in api/main.py, not here.
 """
 
 import hmac
@@ -8,10 +8,18 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import Header, HTTPException, Request, Response, status
 from slowapi import Limiter
+from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from editta.adapters.parsing.safety import MAX_UPLOAD_BYTES
 from editta.api.deps import SESSION_COOKIE_NAME, get_settings
 from editta.services.accounts import session_rate_limit_subject
+
+# The upload limit plus a MiB of multipart framing and form fields; the precise 25 MB
+# check on the file itself stays in validate_upload.
+MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024
 
 
 def new_csrf_cookie_value() -> str:
@@ -57,6 +65,65 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         for header, value in _SECURITY_HEADERS.items():
             response.headers[header] = value
         return response
+
+
+class BodySizeLimitMiddleware:
+    """Refuses request bodies over `max_bytes` with 413 while they stream in.
+
+    FastAPI parses a multipart body before it runs dependencies, so without this an
+    anonymous POST of any size is spooled to disk before the 401, and `file.read()` loads
+    a signed-in user's upload into RAM before validate_upload sees it. Pure ASGI because
+    only the raw `receive` channel can stop a chunked body midway. It answers 413 itself:
+    an exception from `receive` would be turned into a 400 by FastAPI's body parsing.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > self.max_bytes:
+            await self._too_large(scope, receive, send)
+            return
+
+        received = 0
+        exceeded = False
+        started = False
+
+        async def limited_receive() -> Message:
+            nonlocal received, exceeded
+            if exceeded:
+                return {"type": "http.disconnect"}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    exceeded = True
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def limited_send(message: Message) -> None:
+            nonlocal started
+            if exceeded:  # whatever the app answers to a cut-off body is replaced below
+                return
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except Exception:
+            if not exceeded:
+                raise
+        if exceeded and not started:
+            await self._too_large(scope, receive, send)
+
+    async def _too_large(self, scope: Scope, receive: Receive, send: Send) -> None:
+        detail = f"request body exceeds {self.max_bytes // (1024 * 1024)} MB"
+        await JSONResponse({"detail": detail}, status_code=413)(scope, receive, send)
 
 
 async def verify_csrf(request: Request, x_csrf_token: str | None = Header(default=None)) -> None:
