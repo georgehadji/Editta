@@ -172,7 +172,7 @@ class JobRunner:
             await preflight(
                 self._llm,
                 manuscript,
-                analysis_passes_remaining=len(missing),
+                analysis_passes=missing,
                 include_synthesis=not synthesis_done,
                 cost_ceiling_usd=self._cost_ceiling_usd,
             )

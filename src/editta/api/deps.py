@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from editta.adapters.email.console import ConsoleEmailSender
 from editta.adapters.email.smtp import SMTPEmailSender
-from editta.adapters.llm.client import AnthropicLLMClient
+from editta.adapters.llm import build_llm_client
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     AuditEventRepository,
@@ -78,8 +78,10 @@ def get_blob_store() -> BlobStore:
 @lru_cache
 def get_llm_client() -> LLMClient:
     settings = get_settings()
-    return AnthropicLLMClient(
-        settings.anthropic_api_key, max_concurrency=settings.max_llm_concurrency
+    return build_llm_client(
+        anthropic_api_key=settings.anthropic_api_key,
+        openrouter_api_key=settings.openrouter_api_key,
+        max_concurrency=settings.max_llm_concurrency,
     )
 
 

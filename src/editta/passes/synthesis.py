@@ -13,6 +13,7 @@ untrusted content just as it is for the passes.
 
 import json
 
+from editta.domain.budget import GPT_TERRA, SONNET
 from editta.domain.models import ManuscriptText, PassResult, PromptParts, SynthesisPlan
 from editta.domain.synthesis import catalog_findings
 from editta.passes.base import SHARED_EFFORT, SYSTEM_PREAMBLE
@@ -30,6 +31,9 @@ SYNTHESIS_INSTRUCTIONS = (
 class SynthesisPass:
     name = "synthesis"
     effort = SHARED_EFFORT
+    # Groups and summarizes findings it is given; the hard reading is done by then.
+    model = SONNET
+    fallback_models: tuple[str, ...] = (GPT_TERRA,)
     output_schema = SynthesisPlan
 
     def build_prompt(

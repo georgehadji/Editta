@@ -1,11 +1,14 @@
 """Integrity-light pass: unsupported claims + repetitions. Never AI-detection or plagiarism."""
 
+from editta.domain.budget import GPT_SOL, SONNET
 from editta.domain.models import PassFindings
 from editta.passes.base import BaseAnalysisPass
 
 
 class IntegrityPass(BaseAnalysisPass):
     name = "integrity"
+    model = SONNET
+    fallback_models: tuple[str, ...] = (GPT_SOL,)
     output_schema = PassFindings
 
     def instructions(self) -> str:

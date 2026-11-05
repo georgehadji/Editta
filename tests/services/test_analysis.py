@@ -1,5 +1,6 @@
 import pytest
 
+from editta.domain.budget import HAIKU, OPUS, SONNET
 from editta.domain.errors import BudgetExceeded, LLMError, LLMRequestRejected
 from editta.domain.models import (
     CachePolicy,
@@ -17,7 +18,7 @@ MANUSCRIPT = ManuscriptText(source_filename="essay.docx", text=TEXT)
 
 
 @pytest.mark.asyncio
-async def test_the_four_passes_share_one_cacheable_prefix() -> None:
+async def test_the_four_passes_send_one_identical_prefix() -> None:
     llm = FakeLLMClient(manuscript_text=TEXT)
 
     await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
@@ -42,12 +43,39 @@ async def test_synthesis_sends_no_cache_marker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_pass_primes_the_cache_alone_then_the_rest_read_it() -> None:
+async def test_caches_are_shared_only_within_a_model_group() -> None:
+    """Prompt caches are per model: the two Opus passes share one (first writes, the
+    other reads after it); a lone pass on its own model sends no cache marker."""
     llm = FakeLLMClient(manuscript_text=TEXT)
 
-    await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
+    results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
 
-    assert [cache for _, cache in llm.calls] == [CachePolicy.WRITE] + [CachePolicy.READ] * 3
+    assert dict(llm.calls) == {
+        "Analyze language and": CachePolicy.WRITE,
+        "Analyze structure an": CachePolicy.READ,
+        "Analyze metadata and": CachePolicy.NONE,
+        "Light integrity chec": CachePolicy.NONE,
+    }
+    assert llm.calls[0][0] == "Analyze language and"
+    assert [r.pass_name for r in results] == [p.name for p in ANALYSIS_PASSES]
+
+
+@pytest.mark.asyncio
+async def test_passes_are_routed_to_their_models() -> None:
+    llm = FakeLLMClient(manuscript_text=TEXT)
+    results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
+
+    await run_synthesis(MANUSCRIPT, results, llm)
+
+    assert {r.pass_name: r.model for r in results} == {
+        "language": OPUS,
+        "structure": OPUS,
+        "metadata": HAIKU,
+        "integrity": SONNET,
+    }
+    assert llm.models[-1] == SONNET  # synthesis
+    # Every call carries its pass's fallbacks, which a fallback-less model would ignore.
+    assert all(llm.fallbacks) and len(llm.fallbacks) == len(llm.models)
 
 
 @pytest.mark.asyncio
@@ -102,7 +130,7 @@ async def test_preflight_rejects_over_budget_without_calling_analyze() -> None:
     llm = FakeLLMClient(manuscript_text=TEXT)
 
     with pytest.raises(BudgetExceeded):
-        await preflight(llm, MANUSCRIPT, analysis_passes_remaining=4, cost_ceiling_usd=0.001)
+        await preflight(llm, MANUSCRIPT, analysis_passes=ANALYSIS_PASSES, cost_ceiling_usd=0.001)
 
     assert llm.calls == []
     assert llm.token_counts == 1

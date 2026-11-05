@@ -19,7 +19,7 @@ async def run_pipeline(
     await preflight(
         llm,
         manuscript,
-        analysis_passes_remaining=len(ANALYSIS_PASSES),
+        analysis_passes=ANALYSIS_PASSES,
         cost_ceiling_usd=cost_ceiling_usd,
     )
     pass_results = await run_passes(ANALYSIS_PASSES, manuscript, llm)

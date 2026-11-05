@@ -22,3 +22,10 @@ def test_load_settings_fails_fast_when_secret_missing(monkeypatch: pytest.Monkey
 
     with pytest.raises(ValueError):
         load_settings()
+
+
+def test_an_openrouter_key_alone_is_enough(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EDITTA_ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("EDITTA_OPENROUTER_API_KEY", "or-key")
+
+    assert load_settings().openrouter_api_key == "or-key"

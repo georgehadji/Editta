@@ -13,10 +13,19 @@ T = TypeVar("T", bound=BaseModel)
 
 class LLMClient(Protocol):
     async def analyze(
-        self, parts: PromptParts, schema: type[T], *, cache: CachePolicy, effort: str
+        self,
+        parts: PromptParts,
+        schema: type[T],
+        *,
+        cache: CachePolicy,
+        effort: str,
+        model: str,
+        # Models to try, in order, if `model` fails; adapters without a second
+        # provider ignore them.
+        fallbacks: tuple[str, ...] = (),
     ) -> LLMResult[T]: ...
 
-    async def count_tokens(self, parts: PromptParts) -> int: ...
+    async def count_tokens(self, parts: PromptParts, *, model: str) -> int: ...
 
 
 class JobQueue(Protocol):

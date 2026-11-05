@@ -9,8 +9,10 @@ ordering and invariants while callers own side effects.
 
 Invariants enforced here, not by convention at call sites:
   * budget is checked *before* the first billable call (preflight token count);
-  * the first remaining pass runs alone to write the prompt cache, the rest fan out
-    after it (the cache is readable only once a response has started — PLAN.md §4);
+  * passes are grouped by model (prompt caches are per model); in each group the
+    first pass runs alone to write the cache and the rest fan out after it (the cache
+    is readable only once a response has started — PLAN.md §4). Groups run
+    concurrently, and a lone pass sends no cache marker (nothing would read it);
   * every finding that reaches a report is a quote-anchored pass finding: synthesis
     can only cite findings by id (domain/synthesis.py).
 """
@@ -52,7 +54,7 @@ async def preflight(
     llm: LLMClient,
     manuscript: ManuscriptText,
     *,
-    analysis_passes_remaining: int,
+    analysis_passes: Sequence[AnalysisPass],
     cost_ceiling_usd: float,
     include_synthesis: bool = True,
 ) -> int:
@@ -61,12 +63,15 @@ async def preflight(
     Returns the prefix token count. `count_tokens` is free; the tokenizer, not a
     heuristic, decides — Greek tokenizes far denser than English (PLAN.md §4).
     """
-    prefix_tokens = await llm.count_tokens(ANALYSIS_PASSES[0].build_prompt(manuscript))
+    # shortcut: one count with the Opus tokenizer (Sonnet 5.5 shares it) stands in for
+    # every model; count per model if a routed model's tokenizer counts higher.
+    first = ANALYSIS_PASSES[0]
+    prefix_tokens = await llm.count_tokens(first.build_prompt(manuscript), model=first.model)
     check_token_ceiling(prefix_tokens)
     projected = project_remaining_cost_usd(
         prefix_tokens=prefix_tokens,
-        analysis_calls_remaining=analysis_passes_remaining,
-        include_synthesis=include_synthesis,
+        analysis_models=[p.model for p in analysis_passes],
+        synthesis_model=SynthesisPass.model if include_synthesis else None,
     )
     check_budget(projected, cost_ceiling_usd)
     return prefix_tokens
@@ -77,7 +82,12 @@ async def run_pass(
 ) -> PassResult:
     prompt = analysis_pass.build_prompt(manuscript)
     result = await llm.analyze(
-        prompt, analysis_pass.output_schema, cache=cache, effort=analysis_pass.effort
+        prompt,
+        analysis_pass.output_schema,
+        cache=cache,
+        effort=analysis_pass.effort,
+        model=analysis_pass.model,
+        fallbacks=analysis_pass.fallback_models,
     )
     # Concrete analysis passes always use PassFindings (base.py's Protocol only
     # guarantees BaseModel); synthesis has its own schema and its own function below.
@@ -97,7 +107,8 @@ async def run_passes(
     *,
     on_pass_completed: PassCompletedHook | None = None,
 ) -> list[PassResult]:
-    """Run `passes` in cache-prime-then-fan-out order. Returns results in input order.
+    """Run `passes` in cache-prime-then-fan-out order per model group. Returns
+    results in input order.
 
     If a fanned-out pass fails, its siblings still finish and are handed to the hook
     (i.e. checkpointed) before an error is raised — a retry then re-runs only the pass
@@ -112,15 +123,28 @@ async def run_passes(
             await on_pass_completed(result)
         return result
 
-    first, *rest = passes
-    first_result = await _run(first, CachePolicy.WRITE)
-    outcomes = await asyncio.gather(
-        *(_run(p, CachePolicy.READ) for p in rest), return_exceptions=True
-    )
+    async def _run_group(group: list[AnalysisPass]) -> list[PassResult]:
+        first, *rest = group
+        first_result = await _run(first, CachePolicy.WRITE if rest else CachePolicy.NONE)
+        outcomes = await asyncio.gather(
+            *(_run(p, CachePolicy.READ) for p in rest), return_exceptions=True
+        )
+        _raise_any(outcomes)
+        return [first_result, *cast(list[PassResult], outcomes)]
+
+    groups: dict[str, list[AnalysisPass]] = {}
+    for p in passes:
+        groups.setdefault(p.model, []).append(p)
+    outcomes = await asyncio.gather(*map(_run_group, groups.values()), return_exceptions=True)
+    _raise_any(outcomes)
+    by_name = {r.pass_name: r for group in cast(list[list[PassResult]], outcomes) for r in group}
+    return [by_name[p.name] for p in passes]
+
+
+def _raise_any(outcomes: Sequence[object]) -> None:
     errors = [o for o in outcomes if isinstance(o, BaseException)]
     if errors:
         raise _most_decisive(errors)
-    return [first_result, *cast(list[PassResult], outcomes)]
 
 
 def _most_decisive(errors: Sequence[BaseException]) -> BaseException:
@@ -155,5 +179,7 @@ async def run_synthesis(
         synthesis_pass.output_schema,
         cache=CachePolicy.NONE,
         effort=synthesis_pass.effort,
+        model=synthesis_pass.model,
+        fallbacks=synthesis_pass.fallback_models,
     )
     return resolve_synthesis(result.output, catalog_findings(pass_results))

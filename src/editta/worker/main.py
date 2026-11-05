@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager, suppress
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from editta.adapters.llm.client import AnthropicLLMClient
+from editta.adapters.llm import build_llm_client
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     CreditLedgerRepository,
@@ -78,8 +78,10 @@ class Worker:
             access_key=settings.s3_access_key,
             secret_key=settings.s3_secret_key,
         )
-        self._llm = AnthropicLLMClient(
-            settings.anthropic_api_key, max_concurrency=settings.max_llm_concurrency
+        self._llm = build_llm_client(
+            anthropic_api_key=settings.anthropic_api_key,
+            openrouter_api_key=settings.openrouter_api_key,
+            max_concurrency=settings.max_llm_concurrency,
         )
         self._cost_ceiling_usd = settings.job_cost_ceiling_usd
         self._job_cost_credits = settings.job_cost_credits

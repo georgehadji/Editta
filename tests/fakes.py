@@ -45,18 +45,29 @@ class FakeLLMClient:
         self.calls: list[tuple[str, CachePolicy]] = []
         self.prompts: list[PromptParts] = []
         self.efforts: list[str] = []
+        self.models: list[str] = []
+        self.fallbacks: list[tuple[str, ...]] = []
         self.token_counts = 0
 
-    async def count_tokens(self, parts: PromptParts) -> int:
+    async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
         self.token_counts += 1
         return len(parts.manuscript_block) // 4
 
     async def analyze(
-        self, parts: PromptParts, schema: type[T], *, cache: CachePolicy, effort: str
+        self,
+        parts: PromptParts,
+        schema: type[T],
+        *,
+        cache: CachePolicy,
+        effort: str,
+        model: str,
+        fallbacks: tuple[str, ...] = (),
     ) -> LLMResult[T]:
         self.calls.append((parts.instructions[:20], cache))
         self.prompts.append(parts)
         self.efforts.append(effort)
+        self.models.append(model)
+        self.fallbacks.append(fallbacks)
         if self._fail_when is not None and (error := self._fail_when(parts)) is not None:
             raise error
         usage = LLMUsage(
@@ -80,7 +91,7 @@ class FakeLLMClient:
             )
         else:
             output = PassFindings(findings=[self._finding()])
-        return LLMResult(output=cast(T, output), usage=usage, model="fake-model")
+        return LLMResult(output=cast(T, output), usage=usage, model=model)
 
     def _finding(self) -> Finding:
         return Finding(

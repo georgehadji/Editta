@@ -44,14 +44,20 @@ async def test_run_pipeline_primes_cache_before_fanning_out() -> None:
         manuscript_bytes=manuscript_bytes, filename="essay.docx", llm=llm, cost_ceiling_usd=6.0
     )
 
-    caches = [cache for _, cache in llm.calls]
-    assert caches == [CachePolicy.WRITE] + [CachePolicy.READ] * 3 + [CachePolicy.NONE]
+    assert dict(llm.calls[:4]) == {
+        "Analyze language and": CachePolicy.WRITE,
+        "Analyze structure an": CachePolicy.READ,
+        "Analyze metadata and": CachePolicy.NONE,
+        "Light integrity chec": CachePolicy.NONE,
+    }
+    assert llm.calls[0][0] == "Analyze language and"  # the cache writer runs first
+    assert llm.calls[-1][1] is CachePolicy.NONE  # synthesis
 
 
 @pytest.mark.asyncio
 async def test_run_pipeline_aborts_when_manuscript_too_long() -> None:
     class HugeTokenLLM(FakeLLMClient):
-        async def count_tokens(self, parts: PromptParts) -> int:
+        async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
             return 800_000
 
     manuscript_bytes = _build_docx_bytes(MANUSCRIPT_TEXT)

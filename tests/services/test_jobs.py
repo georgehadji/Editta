@@ -115,7 +115,8 @@ async def test_each_step_commits_in_its_own_transaction() -> None:
 @pytest.mark.asyncio
 async def test_resume_runs_only_missing_passes_and_reprimes_the_cache() -> None:
     h = Harness()
-    for pass_name in ("language", "structure"):
+    # The two Opus passes are missing: they share a cache, which the resume re-writes.
+    for pass_name in ("metadata", "integrity"):
         key = _pass_checkpoint_key(h.job_id, pass_name)
         h.blobs.seed(key, b"[]")
         usage = {"input_tokens": 1, "output_tokens": 1}
@@ -127,6 +128,7 @@ async def test_resume_runs_only_missing_passes_and_reprimes_the_cache() -> None:
     # 2 missing passes + synthesis; the first remaining pass re-writes the cache.
     assert len(h.llm.calls) == 3
     assert h.llm.calls[0][1] is CachePolicy.WRITE
+    assert h.llm.calls[1][1] is CachePolicy.READ
 
 
 @pytest.mark.asyncio
@@ -145,7 +147,7 @@ async def test_projected_budget_over_ceiling_dies_before_any_billable_call() -> 
 @pytest.mark.asyncio
 async def test_too_long_manuscript_dies_with_token_message_and_refund() -> None:
     class HugeTokenLLM(FakeLLMClient):
-        async def count_tokens(self, parts: PromptParts) -> int:
+        async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
             return 800_000
 
     h = Harness(llm=HugeTokenLLM(manuscript_text=MANUSCRIPT_TEXT))
