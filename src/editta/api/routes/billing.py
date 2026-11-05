@@ -43,17 +43,16 @@ async def stripe_webhook(
 
     purchase = billing.extract_purchase(event)
     if purchase is not None:
-        tenant_id, credits, stripe_object_id = purchase
-        async with uow.begin(tenant_id) as session:
+        async with uow.begin(purchase.tenant_id) as session:
             # Stripe redelivers webhooks; append_once keys on the event id, so a
             # replay is a no-op (ON CONFLICT DO NOTHING) rather than a double credit
             # or an aborted transaction.
             await CreditLedgerRepository(session).append_once(
-                tenant_id=tenant_id,
-                delta=credits,
+                tenant_id=purchase.tenant_id,
+                delta=purchase.credits,
                 reason="purchase",
                 idempotency_key=f"stripe:{event['id']}",
-                stripe_ref=stripe_object_id,
+                stripe_ref=purchase.checkout_session_id,
             )
     return {"received": True}
 
