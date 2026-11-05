@@ -26,7 +26,13 @@ def _docx_bytes(text: str) -> bytes:
 
 
 class Harness:
-    def __init__(self, *, llm: FakeLLMClient | None = None, cost_ceiling_usd: float = 6.0) -> None:
+    def __init__(
+        self,
+        *,
+        llm: FakeLLMClient | None = None,
+        cost_ceiling_usd: float = 6.0,
+        reserved: int | None = 1,
+    ) -> None:
         self.tenant_id, self.job_id, self.manuscript_id = uuid4(), uuid4(), uuid4()
         self.uow = FakeJobUnitOfWork()
         self.blobs = FakeBlobStore()
@@ -42,6 +48,8 @@ class Harness:
         )
         self.uow.jobs.seed(self.tenant_id, self.job_id, self.manuscript_id, lease_owner=WORKER)
         self.blobs.seed("raw/essay", _docx_bytes(MANUSCRIPT_TEXT))
+        if reserved is not None:  # the upload has already taken the credits
+            self.uow.ledger.seed_reservation(self.tenant_id, self.job_id, reserved)
 
     def claimed(self, attempt: int = 1) -> ClaimedJob:
         return ClaimedJob(
@@ -74,7 +82,7 @@ def _fail_pass(marker: str, error: BaseException) -> FailureRule:
 
 
 @pytest.mark.asyncio
-async def test_happy_path_completes_writes_report_and_reserves_one_credit() -> None:
+async def test_happy_path_completes_and_writes_report() -> None:
     h = Harness()
 
     outcome = await h.runner.run(h.claimed())
@@ -101,12 +109,22 @@ async def test_happy_path_completes_writes_report_and_reserves_one_credit() -> N
 
 
 @pytest.mark.asyncio
+async def test_runner_never_touches_the_ledger_for_a_successful_job() -> None:
+    h = Harness(reserved=None)  # even a job with no reservation: the runner adds none
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.COMPLETED
+    assert h.uow.ledger.entries == []
+
+
+@pytest.mark.asyncio
 async def test_each_step_commits_in_its_own_transaction() -> None:
     h = Harness()
 
     await h.runner.run(h.claimed())
 
-    # reserve, parsing, analyzing, 4 checkpoints, 4 checkpoint loads, synthesizing,
+    # parsing, analyzing, 4 checkpoints, 4 checkpoint loads, synthesizing,
     # exporting, report+completed — never one long transaction around LLM calls.
     assert h.uow.commits >= 10
     assert h.uow.rollbacks == 0
@@ -313,7 +331,7 @@ async def test_missing_manuscript_does_not_mint_a_credit() -> None:
     outcome = await h.runner.run(h.claimed())
 
     assert outcome.kind is JobOutcomeKind.DEAD
-    # Reservation committed in its own transaction, so the refund nets to zero.
+    # The upload's reservation is refunded, so the net is zero.
     assert sum(h.ledger("job") + h.ledger("refund")) == 0
 
 
@@ -322,9 +340,6 @@ async def test_attempt_beyond_the_limit_is_dead_lettered_without_running() -> No
     """Attempts that crashed without recording anything still count (the claim
     increments them), so a crash-looping job ends instead of re-running forever."""
     h = Harness()
-    await h.uow.ledger.append_once(
-        tenant_id=h.tenant_id, delta=-1, reason="job", idempotency_key=f"job:{h.job_id}:reserve"
-    )
 
     outcome = await h.runner.run(h.claimed(attempt=4))
 
@@ -336,7 +351,7 @@ async def test_attempt_beyond_the_limit_is_dead_lettered_without_running() -> No
 
 @pytest.mark.asyncio
 async def test_exhausted_job_without_reservation_gets_no_refund() -> None:
-    h = Harness()
+    h = Harness(reserved=None)
 
     outcome = await h.runner.run(h.claimed(attempt=4))
 
@@ -406,10 +421,7 @@ async def test_synthesis_is_checkpointed_so_an_export_failure_does_not_rebill_it
 
 @pytest.mark.asyncio
 async def test_refund_returns_the_reserved_amount_not_todays_price() -> None:
-    h = Harness()
-    await h.uow.ledger.append_once(
-        tenant_id=h.tenant_id, delta=-2, reason="job", idempotency_key=f"job:{h.job_id}:reserve"
-    )
+    h = Harness(reserved=2)
     h.blobs.seed("raw/essay", b"PK\x03\x04 not a zip")  # dies deterministically
 
     outcome = await h.runner.run(h.claimed())  # runner configured at 1 credit/job

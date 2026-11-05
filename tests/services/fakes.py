@@ -230,6 +230,13 @@ class FakeLedgerRepo:
         self.entries.append({"tenant_id": tenant_id, "delta": delta, "reason": reason})
         return True
 
+    def seed_reservation(self, tenant_id: UUID, job_id: UUID, credits: int) -> None:
+        """What submit_manuscript leaves behind: the credits already spent on the job."""
+        key = f"job:{job_id}:reserve"
+        self._seen_keys.add(key)
+        self._deltas[key] = -credits
+        self.entries.append({"tenant_id": tenant_id, "delta": -credits, "reason": "job"})
+
     async def has_entry(self, idempotency_key: str) -> bool:
         return idempotency_key in self._seen_keys
 
