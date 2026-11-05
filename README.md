@@ -61,6 +61,15 @@ Credits are granted only once the payment is settled. A checkout paid by a delay
 (SEPA debit, bank transfer) completes as `unpaid`; the credits arrive with
 `async_payment_succeeded`. Without that second event such customers are never credited.
 
+## Behind a reverse proxy
+
+- **Request size.** The app refuses bodies over 26 MB with 413. Set the same cap at the
+  proxy so oversized uploads never reach it (nginx: `client_max_body_size 26m;`).
+- **Access logs.** Sign-in links carry a live token (`/t/<tenant>/auth/click?token=…`,
+  valid 15 minutes). The app redacts it in uvicorn's access log, but the proxy's own log
+  must not record query strings for that path: log `$uri` instead of `$request`, or
+  `access_log off;` on that location.
+
 ## Live-API smoke evals
 
 Before the first paid report and after every prompt change: `python -m evals.run` (see
