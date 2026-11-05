@@ -33,13 +33,12 @@ from editta.api.schemas import (
     ReportDownloadResponse,
 )
 from editta.config import Settings
-from editta.domain.errors import InsufficientCredits, ParseError
+from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore
+from editta.services.reports import report_download
 from editta.services.uploads import submit_manuscript
 
 router = APIRouter(prefix="/manuscripts", tags=["manuscripts"], dependencies=[Depends(verify_csrf)])
-
-REPORT_URL_EXPIRES_SECONDS = 3600
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -99,17 +98,16 @@ async def get_report_download_url(
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
 ) -> Envelope[ReportDownloadResponse]:
-    # Report rows have no tenant_id of their own (PLAN.md §3) — authorize via the job.
-    job = await jobs.get_by_id(auth.tenant_id, job_id)
-    if job is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-
-    report = await reports.get_by_job_id(job_id)
-    if report is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "report not ready")
-
-    url = await blobs.presigned_get_url(report.blob_key, expires_in=REPORT_URL_EXPIRES_SECONDS)
-    await audit.append(
-        tenant_id=auth.tenant_id, actor=auth.email, action="download", subject=str(report.id)
-    )
-    return Envelope.ok(ReportDownloadResponse(url=url, expires_in=REPORT_URL_EXPIRES_SECONDS))
+    try:
+        download = await report_download(
+            tenant_id=auth.tenant_id,
+            job_id=job_id,
+            actor=auth.email,
+            jobs=jobs,
+            reports=reports,
+            audit=audit,
+            blobs=blobs,
+        )
+    except NotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return Envelope.ok(ReportDownloadResponse(url=download.url, expires_in=download.expires_in))

@@ -70,6 +70,11 @@ Credits are granted only once the payment is settled. A checkout paid by a delay
   must not record query strings for that path: log `$uri` instead of `$request`, or
   `access_log off;` on that location.
 
+## Scaling workers
+
+Each worker process runs one job at a time. To process jobs in parallel, run more worker
+processes; they claim jobs with `FOR UPDATE SKIP LOCKED`, so they never take the same job.
+
 ## Live-API smoke evals
 
 Before the first paid report and after every prompt change: `python -m evals.run` (see

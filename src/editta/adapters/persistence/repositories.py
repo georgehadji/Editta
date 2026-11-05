@@ -146,16 +146,6 @@ class AnalysisJobRepository:
         )
         return list((await self._session.execute(stmt)).scalars().all())
 
-    async def update_state(
-        self, tenant_id: UUID, job_id: UUID, *, state: str, error: str | None = None
-    ) -> None:
-        job = await self.get_by_id(tenant_id, job_id)
-        if job is None:
-            raise LookupError(f"job {job_id} not found for tenant {tenant_id}")
-        job.state = state
-        job.error = error
-        await self._session.flush()
-
     async def set_state_if_owned(
         self,
         tenant_id: UUID,
@@ -241,14 +231,10 @@ class ReportRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(
-        self, *, job_id: UUID, blob_key: str, summary_blob_key: str | None = None
-    ) -> None:
+    async def create(self, *, job_id: UUID, blob_key: str) -> None:
         """Idempotent on job_id (UNIQUE): an export retried after a crash re-points the
         existing row at the freshly written blob instead of violating the constraint."""
-        stmt = pg_insert(Report).values(
-            id=uuid4(), job_id=job_id, blob_key=blob_key, summary_blob_key=summary_blob_key
-        )
+        stmt = pg_insert(Report).values(id=uuid4(), job_id=job_id, blob_key=blob_key)
         await self._session.execute(
             stmt.on_conflict_do_update(
                 index_elements=[Report.job_id],

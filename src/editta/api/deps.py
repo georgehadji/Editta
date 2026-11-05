@@ -21,7 +21,6 @@ from editta.adapters.persistence.repositories import (
     AuditEventRepository,
     CreditLedgerRepository,
     ManuscriptRepository,
-    PassResultRepository,
     ReportRepository,
     TenantRepository,
     UserRepository,
@@ -138,12 +137,6 @@ def get_job_repo(
     session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
 ) -> AnalysisJobRepository:
     return AnalysisJobRepository(session)
-
-
-def get_pass_result_repo(
-    session: Annotated[AsyncSession, Depends(get_tenant_session, scope="function")],
-) -> PassResultRepository:
-    return PassResultRepository(session)
 
 
 def get_report_repo(

@@ -108,14 +108,6 @@ class FakeAnalysisJobRepo:
     async def list_for_tenant(self, tenant_id: UUID, *, limit: int = 50) -> list[_JobRecord]:
         return [r for (t, _), r in self._records.items() if t == tenant_id][:limit]
 
-    async def update_state(
-        self, tenant_id: UUID, job_id: UUID, *, state: JobState, error: str | None = None
-    ) -> None:
-        self.state_history.append((state, error))
-        record = self._records.get((tenant_id, job_id))
-        if record is not None:
-            record.state, record.error = state, error
-
     def seed(
         self, tenant_id: UUID, job_id: UUID, manuscript_id: UUID, *, lease_owner: str | None
     ) -> _JobRecord:
@@ -195,11 +187,10 @@ class FakePassResultRepo:
 
 
 class _ReportRecord:
-    def __init__(self, job_id: UUID, blob_key: str, summary_blob_key: str | None) -> None:
+    def __init__(self, job_id: UUID, blob_key: str) -> None:
         self.id = uuid4()
         self.job_id = job_id
         self.blob_key = blob_key
-        self.summary_blob_key = summary_blob_key
 
 
 class FakeReportRepo:
@@ -207,11 +198,9 @@ class FakeReportRepo:
         self.created: list[dict[str, Any]] = []
         self._records: dict[UUID, _ReportRecord] = {}
 
-    async def create(
-        self, *, job_id: UUID, blob_key: str, summary_blob_key: str | None = None
-    ) -> None:
+    async def create(self, *, job_id: UUID, blob_key: str) -> None:
         # Mirrors the real repo's upsert-on-job_id: never more than one row per job.
-        self._records[job_id] = _ReportRecord(job_id, blob_key, summary_blob_key)
+        self._records[job_id] = _ReportRecord(job_id, blob_key)
         self.created.append({"job_id": job_id, "blob_key": blob_key})
 
     async def get_by_job_id(self, job_id: UUID) -> _ReportRecord | None:

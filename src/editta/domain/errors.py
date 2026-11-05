@@ -92,5 +92,19 @@ class InsufficientCredits(EdittaError):
         self.required = required
 
 
+class NotFound(EdittaError):
+    """The thing asked for does not exist for this tenant. Delivery layers map it to 404."""
+
+
+class JobNotFound(NotFound):
+    def __init__(self) -> None:
+        super().__init__("job not found")
+
+
+class ReportNotReady(NotFound):
+    def __init__(self) -> None:
+        super().__init__("report not ready")
+
+
 class PermissionDenied(EdittaError):
     """The authenticated user's role does not allow this action."""

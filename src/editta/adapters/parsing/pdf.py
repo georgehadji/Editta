@@ -15,7 +15,6 @@ import re
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from editta.adapters.parsing.safety import validate_upload
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
 
@@ -25,13 +24,8 @@ MAX_EXTRACTED_CHARS = 5_000_000  # ~1M words: far past any essay/book manuscript
 _INLINE_WHITESPACE = re.compile(r"[ \t ]+")
 
 
-def parse_pdf(data: bytes, filename: str) -> ManuscriptText:
-    validate_upload(data, filename)
-    return extract_pdf(data, filename)
-
-
 def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
-    """Extraction only. Callers must have run validate_upload (parse_pdf does)."""
+    """Extraction only. Callers must have run validate_upload (parse_manuscript does)."""
     try:
         reader = PdfReader(io.BytesIO(data), strict=False)
     except (PdfReadError, ValueError, OSError) as exc:
