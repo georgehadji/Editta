@@ -7,6 +7,8 @@ ad hoc, so adding a new failure mode means choosing its retryability in one plac
 
 from typing import ClassVar
 
+from editta.domain.models import LLMUsage
+
 
 class EdittaError(Exception):
     """Base for all Editta domain/application errors."""
@@ -19,14 +21,35 @@ class ParseError(EdittaError):
 
 
 class LLMError(EdittaError):
-    """LLM call failed after retries, or the circuit breaker is open. Usually transient."""
+    """LLM call failed after retries, or the circuit breaker is open. Usually transient.
+
+    Messages end up in job records and API responses, so they must never contain model
+    output or vendor exception text that could quote the manuscript. `usage` is what a
+    call that was billed but unusable cost.
+    """
 
     retryable: ClassVar[bool] = True
+
+    def __init__(self, message: str, *, usage: LLMUsage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 class LLMRequestRejected(LLMError):
     """The provider rejected the request itself (4xx: invalid params, auth, too large).
     Deterministic — retrying the same request fails the same way."""
+
+    retryable: ClassVar[bool] = False
+
+
+class LLMOutputInvalid(LLMError):
+    """The model answered, but not with output that fits the schema (a refusal, say).
+    Retryable: another attempt may answer differently."""
+
+
+class LLMOutputTruncated(LLMError):
+    """The answer hit the output-token ceiling. The same prompt fills the ceiling again,
+    and every try is billed in full, so retrying only burns money."""
 
     retryable: ClassVar[bool] = False
 

@@ -27,6 +27,7 @@ from editta.adapters.llm.client import (
     AnthropicLLMClient,
     _output_config,
     build_user_content,
+    output_error,
 )
 from editta.adapters.llm.resilience import CircuitBreaker, TokenBucket
 from editta.domain.budget import (
@@ -197,10 +198,12 @@ class OpenRouterLLMClient:
             except LLMError:
                 self._breaker.record_failure()
                 raise
+        # The provider answered, so a bad answer is not a provider-health failure.
         self._breaker.record_success()
+        usage = parse_usage(body.get("usage") or {})
         return LLMResult(
-            output=_parse_output(body, schema),
-            usage=parse_usage(body.get("usage") or {}),
+            output=_parse_output(body, schema, usage),
+            usage=usage,
             model=served_model(body, (model, *fallbacks)),
         )
 
@@ -228,6 +231,9 @@ class OpenRouterLLMClient:
                         delay = float(response.headers.get("retry-after") or delay)
             except httpx.HTTPError as exc:
                 error = LLMError(f"OpenRouter call failed: {exc}")
+            except json.JSONDecodeError:
+                # Not str(exc): a decode error quotes the text it choked on.
+                error = LLMError("OpenRouter sent an unreadable response")
             if attempt + 1 < MAX_ATTEMPTS:
                 await asyncio.sleep(delay)
         raise error
@@ -263,14 +269,11 @@ async def _read_body(response: httpx.Response) -> dict[str, Any]:
     return body
 
 
-def _parse_output[T: BaseModel](body: dict[str, Any], schema: type[T]) -> T:
+def _parse_output[T: BaseModel](body: dict[str, Any], schema: type[T], usage: LLMUsage) -> T:
     choice = (body.get("choices") or [{}])[0]
     content = (choice.get("message") or {}).get("content")
     try:
         return schema.model_validate(json.loads(content or ""))
-    except (json.JSONDecodeError, ValidationError) as exc:
-        # A refusal or a max_tokens cut-off yields no parseable output. Retryable:
-        # adaptive thinking length varies between attempts.
-        raise LLMError(
-            f"model returned no structured output (finish: {choice.get('finish_reason')})"
-        ) from exc
+    except (json.JSONDecodeError, ValidationError):
+        # `from None`: both exceptions quote the invalid input, i.e. the manuscript.
+        raise output_error(choice.get("finish_reason"), usage) from None

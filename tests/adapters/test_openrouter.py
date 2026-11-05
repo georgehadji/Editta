@@ -13,7 +13,7 @@ from editta.adapters.llm.openrouter import (
     served_model,
 )
 from editta.domain.budget import GEMINI_ARGON, GPT_SOL, HAIKU, OPUS, SONNET
-from editta.domain.errors import LLMError, LLMRequestRejected
+from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, LLMRequestRejected
 from editta.domain.models import CachePolicy, Finding, PassFindings, PromptParts, Severity
 
 PARTS = PromptParts(system="sys", manuscript_block="manuscript body", instructions="do X")
@@ -189,6 +189,88 @@ async def test_unparseable_output_is_retryable() -> None:
     with pytest.raises(LLMError) as exc_info:
         await client.analyze(PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS)
     assert exc_info.value.retryable
+
+
+def _cut_off(text: str) -> httpx.Response:
+    return _sse(
+        {"model": "anthropic/claude-opus-5.5", "choices": [{"delta": {"content": text}}]},
+        {
+            "model": "anthropic/claude-opus-5.5",
+            "choices": [{"delta": {}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 64_000},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_cut_off_answer_is_not_retried_carries_usage_and_leaks_nothing() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return _cut_off('{"findings":[{"section":"«ἐνδυναμώ')
+
+    with pytest.raises(LLMOutputTruncated) as caught:
+        await _client(handler).analyze(
+            PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS
+        )
+
+    error = caught.value
+    assert len(calls) == 1  # truncation is not a transport fault: no retry inside the adapter
+    assert not error.retryable
+    assert "ἐνδυναμώ" not in str(error)
+    assert error.__cause__ is None and error.__suppress_context__
+    assert error.usage is not None and error.usage.output_tokens == 64_000
+
+
+@pytest.mark.asyncio
+async def test_unparseable_output_leaks_nothing_and_carries_usage() -> None:
+    client = _client(lambda request: _ok("«ἐνδυναμώ not json"))
+
+    with pytest.raises(LLMOutputInvalid) as caught:
+        await client.analyze(PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS)
+
+    assert "ἐνδυναμώ" not in str(caught.value)
+    assert caught.value.usage is not None and caught.value.usage.output_tokens == 5
+
+
+def _garbled() -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/event-stream"},
+        content="data: {«ἐνδυναμώ not json\n\n".encode(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_garbled_stream_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", lambda _: _noop())
+    responses = iter([_garbled(), _ok(FINDINGS.model_dump_json())])
+    client = _client(lambda request: next(responses))
+
+    result = await client.analyze(
+        PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS
+    )
+
+    assert result.output == FINDINGS
+
+
+@pytest.mark.asyncio
+async def test_always_garbled_stream_is_a_retryable_llm_error_without_the_garbage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", lambda _: _noop())
+    client = _client(lambda request: _garbled())
+
+    with pytest.raises(LLMError) as caught:
+        await client.analyze(PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS)
+
+    assert caught.value.retryable
+    assert "ἐνδυναμώ" not in str(caught.value)
+
+
+async def _noop() -> None:
+    return None
 
 
 @pytest.mark.asyncio
