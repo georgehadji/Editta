@@ -94,6 +94,7 @@ class PassResult(Frozen):
     pass_name: str
     findings: list[Finding]
     usage: LLMUsage
+    model: str = ""
 
 
 class Report(Frozen):
@@ -101,3 +102,30 @@ class Report(Frozen):
     generated_at: datetime
     synthesis: SynthesisReport
     pass_results: tuple[PassResult, ...]
+
+
+class JobOutcomeKind(StrEnum):
+    COMPLETED = "completed"
+    RETRY = "retry"
+    DEAD = "dead"
+
+
+class JobOutcome(Frozen):
+    """Result of one JobRunner.run(). The worker maps it to a queue action — the runner
+    itself never touches the queue, so job logic and lease mechanics stay decoupled."""
+
+    kind: JobOutcomeKind
+    error: str | None = None
+    retry_after_seconds: int | None = None
+
+    @classmethod
+    def completed(cls) -> "JobOutcome":
+        return cls(kind=JobOutcomeKind.COMPLETED)
+
+    @classmethod
+    def retry(cls, *, error: str, after_seconds: int) -> "JobOutcome":
+        return cls(kind=JobOutcomeKind.RETRY, error=error, retry_after_seconds=after_seconds)
+
+    @classmethod
+    def dead(cls, *, error: str) -> "JobOutcome":
+        return cls(kind=JobOutcomeKind.DEAD, error=error)

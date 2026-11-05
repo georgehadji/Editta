@@ -1,4 +1,4 @@
-"""`editta analyze manuscript.docx -o report.docx` entrypoint."""
+"""`editta analyze manuscript.(docx|pdf) -o report.docx` entrypoint."""
 
 import argparse
 import asyncio
@@ -19,7 +19,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     analyze = subparsers.add_parser("analyze", help="run editorial analysis on a manuscript")
-    analyze.add_argument("manuscript", type=Path, help="path to a .docx manuscript")
+    analyze.add_argument("manuscript", type=Path, help="path to a .docx or .pdf manuscript")
     analyze.add_argument(
         "-o", "--output", type=Path, required=True, help="path to write the .docx report"
     )
@@ -59,9 +59,12 @@ def main() -> None:
         raise SystemExit(1) from exc
 
     args.output.write_bytes(ReportDocxBuilder(report).build())
-    total_findings = sum(len(r.findings) for r in report.pass_results)
-    passes = len(report.pass_results)
-    print(f"report written to {args.output} ({total_findings} findings across {passes} passes)")
+    pass_findings = sum(len(r.findings) for r in report.pass_results)
+    reported = sum(len(section.findings) for section in report.synthesis.sections)
+    print(
+        f"report written to {args.output} "
+        f"({reported} findings reported, from {pass_findings} anchored pass findings)"
+    )
 
 
 if __name__ == "__main__":

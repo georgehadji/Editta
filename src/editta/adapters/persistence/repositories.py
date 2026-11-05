@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from editta.adapters.persistence.tables import (
@@ -120,6 +121,17 @@ class AnalysisJobRepository:
         job.error = error
         await self._session.flush()
 
+    async def record_failure(
+        self, tenant_id: UUID, job_id: UUID, *, state: str, error: str, attempts_made: int
+    ) -> None:
+        """Persist the outcome of a failed attempt: the next state (pending to retry, or
+        dead), the error, and the attempt count the retry policy decided on."""
+        await self._session.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.tenant_id == tenant_id, AnalysisJob.id == job_id)
+            .values(state=state, error=error, attempt=attempts_made)
+        )
+
     async def record_usage(
         self,
         tenant_id: UUID,
@@ -178,13 +190,18 @@ class ReportRepository:
 
     async def create(
         self, *, job_id: UUID, blob_key: str, summary_blob_key: str | None = None
-    ) -> Report:
-        report = Report(
+    ) -> None:
+        """Idempotent on job_id (UNIQUE): an export retried after a crash re-points the
+        existing row at the freshly written blob instead of violating the constraint."""
+        stmt = pg_insert(Report).values(
             id=uuid4(), job_id=job_id, blob_key=blob_key, summary_blob_key=summary_blob_key
         )
-        self._session.add(report)
-        await self._session.flush()
-        return report
+        await self._session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[Report.job_id],
+                set_={"blob_key": stmt.excluded.blob_key},
+            )
+        )
 
     async def get_by_job_id(self, job_id: UUID) -> Report | None:
         stmt = select(Report).where(Report.job_id == job_id)
@@ -197,7 +214,7 @@ class CreditLedgerRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def append(
+    async def append_once(
         self,
         *,
         tenant_id: UUID,
@@ -206,19 +223,34 @@ class CreditLedgerRepository:
         idempotency_key: str,
         job_id: UUID | None = None,
         stripe_ref: str | None = None,
-    ) -> CreditLedger:
-        entry = CreditLedger(
-            id=uuid4(),
-            tenant_id=tenant_id,
-            delta=delta,
-            reason=reason,
-            job_id=job_id,
-            stripe_ref=stripe_ref,
-            idempotency_key=idempotency_key,
+    ) -> bool:
+        """Append unless an entry with this idempotency_key exists. Returns True if
+        this call appended.
+
+        INSERT ... ON CONFLICT DO NOTHING rather than catching IntegrityError: in
+        Postgres a unique violation aborts the *whole* transaction, so a caught
+        IntegrityError leaves the session unusable and its commit fails — which made
+        webhook replays and job retries error out instead of being no-ops.
+        """
+        result = await self._session.execute(
+            pg_insert(CreditLedger)
+            .values(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                delta=delta,
+                reason=reason,
+                job_id=job_id,
+                stripe_ref=stripe_ref,
+                idempotency_key=idempotency_key,
+            )
+            .on_conflict_do_nothing(index_elements=[CreditLedger.idempotency_key])
+            .returning(CreditLedger.id)
         )
-        self._session.add(entry)
-        await self._session.flush()
-        return entry
+        return result.scalar_one_or_none() is not None
+
+    async def has_entry(self, idempotency_key: str) -> bool:
+        stmt = select(CreditLedger.id).where(CreditLedger.idempotency_key == idempotency_key)
+        return (await self._session.execute(stmt)).first() is not None
 
     async def balance(self, tenant_id: UUID) -> int:
         stmt = select(func.coalesce(func.sum(CreditLedger.delta), 0)).where(

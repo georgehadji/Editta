@@ -1,7 +1,7 @@
 import pytest
 
 from editta.domain.models import Finding, LLMUsage, ManuscriptText, PassResult, Severity
-from editta.passes.base import SYSTEM_PREAMBLE
+from editta.passes.base import SHARED_EFFORT, SYSTEM_PREAMBLE
 from editta.passes.integrity import IntegrityPass
 from editta.passes.language import LanguagePass
 from editta.passes.metadata import MetadataPass
@@ -43,6 +43,21 @@ def test_synthesis_prompt_carries_pass_results_not_new_instructions_from_manuscr
 
     parts = SynthesisPass().build_prompt(MANUSCRIPT, [pass_result])
 
-    assert "no recommendation" not in parts.system.lower()  # instruction phrased positively
-    assert "recommendation" in parts.system.lower()
+    # The safety rail and the pass results live after the cached prefix, not in it.
+    assert "recommendation" in parts.instructions.lower()
     assert "unclear opening" in parts.instructions
+    assert parts.instructions.index("recommendation") < parts.instructions.index("unclear opening")
+
+
+def test_every_call_shares_one_cacheable_prefix() -> None:
+    """Prompt-cache invariant (PLAN.md §4): system prompt, manuscript block and effort
+    must be identical across all four passes *and* synthesis. Any difference means the
+    later calls re-pay the full manuscript instead of reading it from the cache —
+    per the Anthropic docs, an effort change alone invalidates the messages cache."""
+    synthesis = SynthesisPass()
+    synthesis_parts = synthesis.build_prompt(MANUSCRIPT, [])
+    prompts = [p.build_prompt(MANUSCRIPT) for p in ALL_PASSES] + [synthesis_parts]
+
+    assert {parts.system for parts in prompts} == {SYSTEM_PREAMBLE}
+    assert {parts.manuscript_block for parts in prompts} == {MANUSCRIPT.text}
+    assert {p.effort for p in ALL_PASSES} | {synthesis.effort} == {SHARED_EFFORT}

@@ -16,6 +16,7 @@ from editta.api.deps import SESSION_COOKIE_NAME
 def new_csrf_cookie_value() -> str:
     return secrets.token_urlsafe(32)
 
+
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 _SECURITY_HEADERS = {
@@ -54,9 +55,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-async def verify_csrf(
-    request: Request, x_csrf_token: str | None = Header(default=None)
-) -> None:
+async def verify_csrf(request: Request, x_csrf_token: str | None = Header(default=None)) -> None:
     """Double-submit cookie check. Only applies to mutating methods on session-cookie
     (browser) requests — a missing session cookie means there's no session to forge."""
     if request.method not in _MUTATING_METHODS:

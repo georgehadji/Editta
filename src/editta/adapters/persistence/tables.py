@@ -4,13 +4,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, ForeignKey, UniqueConstraint, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    pass
+    # Every timestamp is TIMESTAMPTZ, matching migration 0001. Without this the ORM
+    # metadata declared naive TIMESTAMP, so create_all-built schemas (the integration
+    # tests) rejected the tz-aware datetimes the application writes.
+    type_annotation_map = {datetime: DateTime(timezone=True)}
 
 
 class UUIDPKMixin:

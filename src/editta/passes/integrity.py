@@ -6,7 +6,6 @@ from editta.passes.base import BaseAnalysisPass
 
 class IntegrityPass(BaseAnalysisPass):
     name = "integrity"
-    effort = "medium"
     output_schema = PassFindings
 
     def instructions(self) -> str:

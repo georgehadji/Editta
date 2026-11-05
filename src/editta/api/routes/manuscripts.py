@@ -1,14 +1,10 @@
 """Upload, job status polling, report download via presigned URL."""
 
-import hashlib
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 
-from editta.adapters.parsing.safety import validate_upload
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     AuditEventRepository,
@@ -35,10 +31,9 @@ from editta.api.schemas import (
 from editta.config import Settings
 from editta.domain.errors import ParseError
 from editta.domain.ports import BlobStore
+from editta.services.uploads import submit_manuscript
 
-router = APIRouter(
-    prefix="/manuscripts", tags=["manuscripts"], dependencies=[Depends(verify_csrf)]
-)
+router = APIRouter(prefix="/manuscripts", tags=["manuscripts"], dependencies=[Depends(verify_csrf)])
 
 REPORT_URL_EXPIRES_SECONDS = 3600
 
@@ -53,31 +48,23 @@ async def upload_manuscript(
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Envelope[ManuscriptUploadResponse]:
-    data = await file.read()
-    filename = file.filename or "manuscript.docx"
     try:
-        validate_upload(data, filename)
+        submitted = await submit_manuscript(
+            tenant_id=auth.tenant_id,
+            actor=auth.email,
+            data=await file.read(),
+            filename=file.filename,
+            manuscripts=manuscripts,
+            jobs=jobs,
+            audit=audit,
+            blobs=blobs,
+            retention_days=settings.manuscript_retention_days,
+        )
     except ParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-
-    sha256 = hashlib.sha256(data).hexdigest()
-    retention_until = datetime.now(UTC) + timedelta(days=settings.manuscript_retention_days)
-
-    manuscript = await manuscripts.create(
-        tenant_id=auth.tenant_id,
-        title=filename,
-        blob_key=f"{auth.tenant_id}/manuscripts/{sha256}/{filename}",
-        sha256=sha256,
-        retention_until=retention_until,
+    return Envelope.ok(
+        ManuscriptUploadResponse(manuscript_id=submitted.manuscript_id, job_id=submitted.job_id)
     )
-    await blobs.put(manuscript.blob_key, _single_chunk(data))
-
-    job = await jobs.create(tenant_id=auth.tenant_id, manuscript_id=manuscript.id)
-    await audit.append(
-        tenant_id=auth.tenant_id, actor=auth.email, action="upload", subject=str(manuscript.id)
-    )
-
-    return Envelope.ok(ManuscriptUploadResponse(manuscript_id=manuscript.id, job_id=job.id))
 
 
 @router.get("/jobs/{job_id}")
@@ -115,7 +102,3 @@ async def get_report_download_url(
         tenant_id=auth.tenant_id, actor=auth.email, action="download", subject=str(report.id)
     )
     return Envelope.ok(ReportDownloadResponse(url=url, expires_in=REPORT_URL_EXPIRES_SECONDS))
-
-
-async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
-    yield data

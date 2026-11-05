@@ -4,6 +4,14 @@ Claim doesn't touch job `state` — that stays the job runner's decision (it ins
 checkpointed PassResults to resume at the right pipeline stage). Claim only grants
 lease ownership: any non-terminal job whose lease is free or expired is claimable,
 which is how a crashed worker's job gets picked back up without any special-casing.
+
+Claimability is decided by `lease_expires_at` alone:
+  * NULL            -> free (released, or never claimed)
+  * in the past     -> free (owner crashed or stopped heartbeating)
+  * in the future   -> held: by `lease_owner` while a worker runs it, or by nobody
+                       when `defer()` parked it for retry backoff.
+That one rule gives crash recovery and retry backoff without a scheduler or a
+second column.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -22,7 +30,7 @@ _CLAIM_SQL = text("""
     WHERE id = (
         SELECT id FROM analysis_jobs
         WHERE state NOT IN ('completed', 'failed', 'dead', 'cancelled')
-          AND (lease_owner IS NULL OR lease_expires_at < :now)
+          AND (lease_expires_at IS NULL OR lease_expires_at < :now)
         ORDER BY created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -37,6 +45,11 @@ _HEARTBEAT_SQL = text("""
 
 _RELEASE_SQL = text("""
     UPDATE analysis_jobs SET lease_owner = NULL, lease_expires_at = NULL WHERE id = :job_id
+""")
+
+_DEFER_SQL = text("""
+    UPDATE analysis_jobs SET lease_owner = NULL, lease_expires_at = :not_before
+    WHERE id = :job_id
 """)
 
 
@@ -82,4 +95,11 @@ class PostgresJobQueue:
 
     async def release(self, job_id: UUID) -> None:
         await self._session.execute(_RELEASE_SQL, {"job_id": job_id})
+        await self._session.commit()
+
+    async def defer(self, job_id: UUID, *, delay_seconds: int) -> None:
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must be >= 0")
+        not_before = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+        await self._session.execute(_DEFER_SQL, {"job_id": job_id, "not_before": not_before})
         await self._session.commit()

@@ -185,6 +185,8 @@ CANCELLED reachable from any non-terminal state.
 
 Each pass checkpoint persists to `PassResult` on completion. **Retry resumes from the last checkpoint — completed passes are never re-run and never re-billed in tokens.**
 
+**Transactions:** every pipeline step commits in its own short transaction (`services/jobs.py`); no LLM call runs inside an open transaction. A failure therefore never rolls back checkpoints or its own FAILED record. **Retry policy** (`domain/states.py`): `EdittaError.retryable` decides — `LLMError` retries with exponential backoff (60s, 120s, … cap 30 min, via `JobQueue.defer`, i.e. the lease's expiry) up to 3 attempts; `ParseError`/`BudgetExceeded` go straight to DEAD. The credit is reserved once per job and refunded only on DEAD.
+
 ---
 
 ## 4. LLM Strategy (token minimization is designed-in, not bolted-on)
@@ -201,7 +203,7 @@ Each pass checkpoint persists to `PassResult` on completion. **Retry resumes fro
 4. Synthesis               → same cached prefix + 4 compact JSON pass results
 ```
 
-**Ordering matters:** the cache becomes readable only after the first response begins. Prime with one call, then fan out — firing all 4 concurrently pays full input price 4×.
+**Ordering matters:** the cache becomes readable only after the first response begins. Prime with one call, then fan out — firing all 4 concurrently pays full input price 4×. The budget ceiling is checked **before** the first billable call, from the `count_tokens` preflight (`domain/budget.project_remaining_cost_usd`), on both the CLI and the worker path (shared core: `services/analysis.py`).
 
 | Cost component | ≈ per manuscript |
 |---|---|
@@ -214,7 +216,7 @@ At 25–40€/report → ~93% gross margin. **Budget guardrail:** `domain/budget
 **Further token techniques:**
 
 - **Structured outputs** (`output_config.format` + Pydantic schema) on all 4 analysis passes: compact JSON findings (`section`, `quote`, `issue`, `severity`, `suggestion`) — no prose padding in intermediate results, guaranteed parseable, zero retry-on-malformed-JSON waste.
-- **Adaptive thinking** (`thinking: {type: "adaptive"}`) with `effort: "high"` for structure & synthesis, `"medium"` for language/metadata/integrity.
+- **Adaptive thinking** (`thinking: {type: "adaptive"}`) with one `effort` (`"high"`, the Opus 5 default) for **all** passes and synthesis. Per the prompt-caching docs, changing `output_config.effort` invalidates the messages cache — where the manuscript lives — so mixed per-pass effort silently turns cache reads into full-price misses. Synthesis likewise shares the passes' system prompt; its own instructions go after the cached prefix. Per-pass effort is possible later via the beta per-message effort feature (`passes/base.py`).
 - **Checkpoint resume** (§3) — failed jobs never re-pay completed passes.
 - **Batches API (Phase 5):** 50% off everything for bulk/overnight submissions ("upload evening, reports by morning"). Same code path, different endpoint — designed behind the `LLMClient` port from day one.
 - **Never estimate Greek tokens with tiktoken** — always the `count_tokens` endpoint.
@@ -231,12 +233,12 @@ Manuscripts are unpublished intellectual property — confidentiality is the pro
 **Upload hardening (`adapters/parsing/safety.py`):**
 - Size cap (25 MB), MIME check by magic bytes (not extension), reject `.docm`/macro containers.
 - Zip-bomb guard: max decompressed size 100 MB, max archive entries 2,000, no path traversal on entry names.
-- Files stored under UUID keys; original filename kept only as DB metadata (sanitized).
+- Files stored under UUID keys (`{tenant}/manuscripts/{uuid}/source`); original filename kept only as DB metadata (sanitized, `parsing.sanitize_filename`). Format is dispatched on the *detected* type (`parsing.parse_manuscript`); PDFs need a text layer (no OCR).
 
 **Prompt-injection defense (manuscripts are untrusted input):**
 - Manuscript text isolated in a clearly delimited data block; system prompt states it is content to analyze, never instructions.
 - No tools enabled on analysis calls; structured-output schema constrains the response shape.
-- **Quote anchoring:** every finding must include a verbatim quote; the pipeline verifies the quote exists in the source text (fuzzy match ≥ 0.9). Kills both injection-steered and hallucinated findings before they reach an editor.
+- **Quote anchoring:** every finding must include a verbatim quote; the pipeline verifies the quote exists in the source text (fuzzy match ≥ 0.9). Kills both injection-steered and hallucinated findings before they reach an editor. Applied to the **synthesis output too** — that is what the DOCX shows — where each finding must also trace to a finding some pass produced (synthesis adds no new findings, enforced in `domain/quotes.anchor_synthesis`).
 
 **Tenancy & access:**
 - Every repository method takes `tenant_id`; Postgres **Row-Level Security** as defense-in-depth (second, independent enforcement layer).

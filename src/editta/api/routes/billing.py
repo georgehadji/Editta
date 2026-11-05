@@ -6,12 +6,10 @@ earliest point tenant is known, so it can't go through the usual get_tenant_sess
 dependency chain, which requires an authenticated request. Stripe isn't logged in.
 """
 
-from contextlib import suppress
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy.exc import IntegrityError
 
 from editta.adapters.persistence.repositories import CreditLedgerRepository
 from editta.adapters.persistence.uow import UnitOfWork
@@ -47,16 +45,16 @@ async def stripe_webhook(
     if purchase is not None:
         tenant_id, credits, stripe_object_id = purchase
         async with uow.begin(tenant_id) as session:
-            # Stripe redelivers webhooks; the ledger's idempotency_key UNIQUE
-            # constraint makes a replay a no-op instead of a double credit.
-            with suppress(IntegrityError):
-                await CreditLedgerRepository(session).append(
-                    tenant_id=tenant_id,
-                    delta=credits,
-                    reason="purchase",
-                    idempotency_key=f"stripe:{event['id']}",
-                    stripe_ref=stripe_object_id,
-                )
+            # Stripe redelivers webhooks; append_once keys on the event id, so a
+            # replay is a no-op (ON CONFLICT DO NOTHING) rather than a double credit
+            # or an aborted transaction.
+            await CreditLedgerRepository(session).append_once(
+                tenant_id=tenant_id,
+                delta=credits,
+                reason="purchase",
+                idempotency_key=f"stripe:{event['id']}",
+                stripe_ref=stripe_object_id,
+            )
     return {"received": True}
 
 
