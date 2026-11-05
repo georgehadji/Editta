@@ -58,6 +58,7 @@ class CallRecord:
     schema: str
     cache: CachePolicy
     effort: str
+    model: str
     usage: LLMUsage
     raw_findings: int | None  # analysis passes only: findings before anchoring
     seconds: float
@@ -123,27 +124,27 @@ def score_findings(checklist: Checklist, report: Report, score: EssayScore) -> N
 
 
 def score_cache(calls: Sequence[CallRecord], score: EssayScore) -> None:
-    """Passes 2-4 must read the cache pass 1 wrote; synthesis must not write one."""
-    analysis = [c for c in calls if c.raw_findings is not None]
-    synthesis = [c for c in calls if c.raw_findings is None]
+    """Every call that asked to write the cache wrote it and every one that asked to read
+    it read it (caches are per model: services/analysis.py); synthesis writes none."""
     problems: list[str] = []
-    if analysis and analysis[0].usage.cache_write_tokens == 0:
-        problems.append("pass 1 wrote no cache (prefix below the model's minimum?)")
-    misses = [i + 2 for i, c in enumerate(analysis[1:]) if c.usage.cache_read_tokens == 0]
-    if misses:
-        problems.append(f"passes {misses} read no cache")
-    if any(c.usage.cache_write_tokens for c in synthesis):
+    writes = [c for c in calls if c.cache is CachePolicy.WRITE]
+    reads = [c for c in calls if c.cache is CachePolicy.READ]
+    if unwritten := [c.model for c in writes if not c.usage.cache_write_tokens]:
+        problems.append(f"{unwritten} wrote no cache (prefix below the model's minimum?)")
+    if unread := [c.model for c in reads if not c.usage.cache_read_tokens]:
+        problems.append(f"{unread} read no cache")
+    if any(c.usage.cache_write_tokens for c in calls if c.raw_findings is None):
         problems.append("synthesis wrote a cache entry (paid 1.25x for nothing)")
     score.cache_ok = not problems
-    score.cache_detail = "; ".join(problems) or (
-        f"pass 1 wrote {analysis[0].usage.cache_write_tokens if analysis else 0} tokens; "
-        f"passes 2-{len(analysis)} read it"
+    score.cache_detail = (
+        "; ".join(problems) or f"{len(writes)} cache write(s), {len(reads)} read(s)"
     )
 
 
 def score_cost(calls: Sequence[CallRecord], score: EssayScore) -> None:
     score.cost_usd = sum(
         estimate_cost_usd(
+            model=c.model,
             cache_write_tokens=c.usage.cache_write_tokens,
             cache_read_tokens=c.usage.cache_read_tokens,
             plain_input_tokens=c.usage.input_tokens,  # API input_tokens exclude cache tokens

@@ -1,11 +1,14 @@
 """Language & style analysis pass."""
 
+from editta.domain.budget import GEMINI_ARGON, OPUS
 from editta.domain.models import PassFindings
 from editta.passes.base import BaseAnalysisPass
 
 
 class LanguagePass(BaseAnalysisPass):
     name = "language"
+    model = OPUS
+    fallback_models: tuple[str, ...] = (GEMINI_ARGON,)
     output_schema = PassFindings
 
     def instructions(self) -> str:

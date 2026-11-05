@@ -21,7 +21,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from editta.adapters.export.docx_builder import ReportDocxBuilder
-from editta.adapters.llm.client import AnthropicLLMClient
+from editta.adapters.llm import build_llm_client
 from editta.adapters.persistence.repositories import TenantRepository, UserRepository
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.domain.errors import EdittaError
@@ -80,7 +80,11 @@ def _require_env(name: str) -> str:
 
 
 def _analyze(args: argparse.Namespace) -> None:
-    api_key = _require_env("EDITTA_ANTHROPIC_API_KEY")
+    anthropic_key = os.environ.get("EDITTA_ANTHROPIC_API_KEY")
+    openrouter_key = os.environ.get("EDITTA_OPENROUTER_API_KEY")
+    if not (anthropic_key or openrouter_key):
+        print("set EDITTA_OPENROUTER_API_KEY or EDITTA_ANTHROPIC_API_KEY", file=sys.stderr)
+        raise SystemExit(1)
     try:
         manuscript_bytes = args.manuscript.read_bytes()
     except OSError as exc:
@@ -91,7 +95,9 @@ def _analyze(args: argparse.Namespace) -> None:
         run_pipeline(
             manuscript_bytes=manuscript_bytes,
             filename=args.manuscript.name,
-            llm=AnthropicLLMClient(api_key=api_key),
+            llm=build_llm_client(
+                anthropic_api_key=anthropic_key, openrouter_api_key=openrouter_key
+            ),
             cost_ceiling_usd=args.cost_ceiling,
         )
     )

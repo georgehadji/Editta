@@ -1,6 +1,6 @@
 """Application settings. Fails fast at startup if required secrets are missing."""
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +11,10 @@ class Settings(BaseSettings):
     # BYPASSRLS role for the queue-claiming connection (infra/migrations 0002-0003).
     # Falls back to database_url for single-role local dev; production must set it.
     worker_database_url: str | None = None
-    anthropic_api_key: str
+    # One of the two is required; with both, OpenRouter serves the model calls and
+    # Anthropic only counts tokens (adapters/llm/__init__.py).
+    anthropic_api_key: str | None = None
+    openrouter_api_key: str | None = None
     s3_endpoint_url: str
     s3_bucket: str
     s3_access_key: str
@@ -42,6 +45,12 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_price_id: str | None = None
     credits_per_purchase: int = 10
+
+    @model_validator(mode="after")
+    def _require_an_llm_key(self) -> "Settings":
+        if not (self.anthropic_api_key or self.openrouter_api_key):
+            raise ValueError("set EDITTA_OPENROUTER_API_KEY or EDITTA_ANTHROPIC_API_KEY")
+        return self
 
 
 def load_settings() -> Settings:

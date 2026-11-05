@@ -53,20 +53,30 @@ class RecordingLLMClient:
         self._inner = inner
         self.calls: list[CallRecord] = []
 
-    async def count_tokens(self, parts: PromptParts) -> int:
-        return await self._inner.count_tokens(parts)
+    async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
+        return await self._inner.count_tokens(parts, model=model)
 
     async def analyze(
-        self, parts: PromptParts, schema: type[T], *, cache: CachePolicy, effort: str
+        self,
+        parts: PromptParts,
+        schema: type[T],
+        *,
+        cache: CachePolicy,
+        effort: str,
+        model: str,
+        fallbacks: tuple[str, ...] = (),
     ) -> LLMResult[T]:
         started = time.monotonic()
-        result = await self._inner.analyze(parts, schema, cache=cache, effort=effort)
+        result = await self._inner.analyze(
+            parts, schema, cache=cache, effort=effort, model=model, fallbacks=fallbacks
+        )
         output = result.output
         self.calls.append(
             CallRecord(
                 schema=schema.__name__,
                 cache=cache,
                 effort=effort,
+                model=result.model,
                 usage=result.usage,
                 raw_findings=len(output.findings) if isinstance(output, PassFindings) else None,
                 seconds=round(time.monotonic() - started, 2),

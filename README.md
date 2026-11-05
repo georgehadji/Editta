@@ -23,6 +23,20 @@ Integration tests (real Postgres, real migrations, RLS under production-like rol
 when Docker is available, or against any Postgres you can `CREATE DATABASE` on:
 `EDITTA_TEST_DATABASE_URL=postgresql+asyncpg://postgres@localhost:5432/postgres pytest`.
 
+## LLM provider and models
+
+Hard passes (language, structure) run on Claude Opus 5.5, integrity and synthesis on
+Sonnet 5.5, metadata on Haiku 5.5 (`model` on each class in `src/editta/passes/`).
+Set `EDITTA_OPENROUTER_API_KEY` to send these calls through OpenRouter, or only
+`EDITTA_ANTHROPIC_API_KEY` to call Anthropic directly. With both set, OpenRouter serves
+the calls and the Anthropic key is used only for free, exact token counts.
+
+On OpenRouter each pass also names fallback models (`fallback_models`), tried in order
+when its model errors: Gemini 4 Argon for language, GPT-6.1-sol for structure and
+integrity, Gemini 3.8 Flash for metadata, GPT-6.1-terra for synthesis. Calls are streamed
+and routed only to zero-data-retention endpoints. The budget projection prices each
+pass's primary model, so a job that falls back can cost more than projected.
+
 ## Accounts (invite-only)
 
 Nobody can sign in until an account exists. Create a tenant and its first admin from the

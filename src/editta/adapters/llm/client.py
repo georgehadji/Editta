@@ -19,11 +19,11 @@ from editta.domain.models import CachePolicy, LLMResult, LLMUsage, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
 
-MODEL: Final = "claude-opus-5"
 # Must cover adaptive thinking at high effort *plus* the structured findings JSON; at
-# 8192 a long thinking phase could truncate the JSON and fail the parse. Kept under
-# the SDK's non-streaming ceiling (~21k tokens, beyond which it requires streaming).
-MAX_OUTPUT_TOKENS: Final = 16_000
+# 8192 a long thinking phase could truncate the JSON and fail the parse, and at 16k a
+# book-length part did (calls stream, so the SDK's non-streaming ceiling no longer
+# applies). A ceiling only: output is billed as generated.
+MAX_OUTPUT_TOKENS: Final = 64_000
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 _EFFORTS: Final = frozenset(get_args(Effort))
@@ -74,10 +74,10 @@ class AnthropicLLMClient:
             capacity=rate_limit_per_minute, refill_per_second=rate_limit_per_minute / 60
         )
 
-    async def count_tokens(self, parts: PromptParts) -> int:
+    async def count_tokens(self, parts: PromptParts, *, model: str) -> int:
         try:
             response = await self._client.messages.count_tokens(
-                model=MODEL, system=parts.system, messages=_messages(parts, CachePolicy.NONE)
+                model=model, system=parts.system, messages=_messages(parts, CachePolicy.NONE)
             )
         except Exception as exc:
             if _is_rejection(exc):
@@ -86,15 +86,24 @@ class AnthropicLLMClient:
         return int(response.input_tokens)
 
     async def analyze(
-        self, parts: PromptParts, schema: type[T], *, cache: CachePolicy, effort: str
+        self,
+        parts: PromptParts,
+        schema: type[T],
+        *,
+        cache: CachePolicy,
+        effort: str,
+        model: str,
+        fallbacks: tuple[str, ...] = (),  # Anthropic-only: nothing to fall back to
     ) -> LLMResult[T]:
         output_config = _output_config(effort)
         self._breaker.before_call()
         async with self._semaphore:
             await self._bucket.acquire()
             try:
-                message = await self._client.messages.parse(
-                    model=MODEL,
+                # Streamed: a book-length non-streamed call is dropped by the network
+                # long before Opus answers.
+                async with self._client.messages.stream(
+                    model=model,
                     max_tokens=MAX_OUTPUT_TOKENS,
                     system=parts.system,
                     messages=_messages(parts, cache),
@@ -104,7 +113,8 @@ class AnthropicLLMClient:
                     thinking={"type": "adaptive"},
                     output_config=output_config,
                     output_format=schema,
-                )
+                ) as stream:
+                    message = await stream.get_final_message()
             except Exception as exc:
                 if _is_rejection(exc):
                     raise LLMRequestRejected(f"LLM request rejected: {exc}") from exc
@@ -124,5 +134,5 @@ class AnthropicLLMClient:
                 cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
                 cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             ),
-            model=MODEL,
+            model=model,
         )

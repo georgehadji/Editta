@@ -9,6 +9,7 @@ from evals.run import EVALS_DIR, evaluate, load_checklists, markdown_to_docx, ve
 from evals.scoring import CallRecord, score_essay
 
 from editta.adapters.parsing import parse_manuscript
+from editta.domain.budget import OPUS
 from editta.domain.models import (
     CachePolicy,
     Finding,
@@ -83,14 +84,19 @@ def _report(quotes: list[str], overview: str = "overview") -> Report:
 
 
 def _calls(*, pass2_reads: int = 900) -> list[CallRecord]:
-    def call(write: int, read: int, raw: int | None) -> CallRecord:
+    def call(cache: CachePolicy, write: int, read: int, raw: int | None) -> CallRecord:
         usage = LLMUsage(
             input_tokens=50, output_tokens=500, cache_write_tokens=write, cache_read_tokens=read
         )
-        return CallRecord("X", CachePolicy.READ, "high", usage, raw, 1.0)
+        return CallRecord("X", cache, "high", OPUS, usage, raw, 1.0)
 
-    return [call(900, 0, 2), call(0, pass2_reads, 2), call(0, 900, 2), call(0, 900, 2)] + [
-        call(0, 0, None)
+    write, read, none = CachePolicy.WRITE, CachePolicy.READ, CachePolicy.NONE
+    return [
+        call(write, 900, 0, 2),
+        call(read, 0, pass2_reads, 2),
+        call(none, 0, 0, 2),
+        call(none, 0, 0, 2),
+        call(none, 0, 0, None),
     ]
 
 
@@ -122,7 +128,7 @@ def test_a_cache_miss_on_a_fanned_out_pass_fails_the_essay() -> None:
     failures = verdict(score, min_recall=0.0, cost_ceiling_usd=6.0)
 
     assert not score.cache_ok
-    assert any("passes [2] read no cache" in f for f in failures)
+    assert any("read no cache" in f for f in failures)
 
 
 def test_anchoring_drop_rate_is_reported() -> None:
