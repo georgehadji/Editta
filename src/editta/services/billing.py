@@ -8,13 +8,32 @@ UNIQUE constraint used everywhere else (PLAN.md §3): the Stripe event id IS the
 idempotency key, so a redelivered webhook is a no-op, not a double credit.
 """
 
+from dataclasses import dataclass
+from typing import Final
 from uuid import UUID
 
 import stripe
+import structlog
 
 from editta.domain.errors import EdittaError
 
-CHECKOUT_COMPLETED_EVENT = "checkout.session.completed"
+logger = structlog.get_logger(__name__)
+
+CHECKOUT_COMPLETED_EVENT: Final = "checkout.session.completed"
+# Delayed payment methods (SEPA debit, bank transfer) complete the checkout while the
+# payment is still "unpaid"; Stripe confirms the money later with this event.
+ASYNC_PAYMENT_SUCCEEDED_EVENT: Final = "checkout.session.async_payment_succeeded"
+# "no_payment_required" is a checkout fully covered by a coupon.
+_SETTLED: Final = frozenset({"paid", "no_payment_required"})
+
+
+@dataclass(frozen=True, slots=True)
+class Purchase:
+    """Credits owed for one settled Checkout Session."""
+
+    tenant_id: UUID
+    credits: int
+    checkout_session_id: str
 
 
 class WebhookVerificationError(EdittaError):
@@ -58,11 +77,24 @@ class BillingService:
         except (ValueError, stripe.error.SignatureVerificationError) as exc:
             raise WebhookVerificationError("invalid Stripe webhook signature") from exc
 
-    def extract_purchase(self, event: stripe.Event) -> tuple[UUID, int, str] | None:
-        """Returns (tenant_id, credits_to_award, stripe_object_id), or None if this
-        event isn't a completed checkout (nothing to credit)."""
-        if event["type"] != CHECKOUT_COMPLETED_EVENT:
+    def extract_purchase(self, event: stripe.Event) -> Purchase | None:
+        """The purchase to credit, or None when this event settles nothing: another event
+        type, a checkout whose payment is still pending, or a session that is not ours.
+
+        For one Checkout Session Stripe sends `completed` with a settled status, or
+        `completed` as unpaid followed by `async_payment_succeeded` -- never two
+        crediting events -- so the event id stays a safe idempotency key.
+        """
+        if event["type"] not in (CHECKOUT_COMPLETED_EVENT, ASYNC_PAYMENT_SUCCEEDED_EVENT):
             return None
         session = event["data"]["object"]
-        tenant_id = UUID(session["metadata"]["tenant_id"])
-        return tenant_id, self._credits_per_purchase, str(session["id"])
+        if event["type"] == CHECKOUT_COMPLETED_EVENT and session["payment_status"] not in _SETTLED:
+            return None
+        try:
+            tenant_id = UUID(session["metadata"]["tenant_id"])
+        except (KeyError, TypeError, ValueError):
+            # Another integration on the same Stripe account (a Payment Link, say).
+            # Answering 5xx would make Stripe retry for days.
+            logger.warning("billing.event_without_tenant", event_id=event["id"])
+            return None
+        return Purchase(tenant_id, self._credits_per_purchase, str(session["id"]))

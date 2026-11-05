@@ -50,6 +50,17 @@ editta add-user --tenant <tenant-id> --email editor@polis.gr --role editor   # o
 Outside `EDITTA_ENVIRONMENT=development`, SMTP must be configured: sign-in links are
 only ever emailed, never logged or shown on the page.
 
+## Billing (Stripe)
+
+Point a Stripe webhook endpoint at `POST /billing/webhook` and enable these events:
+
+- `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+
+Credits are granted only once the payment is settled. A checkout paid by a delayed method
+(SEPA debit, bank transfer) completes as `unpaid`; the credits arrive with
+`async_payment_succeeded`. Without that second event such customers are never credited.
+
 ## Live-API smoke evals
 
 Before the first paid report and after every prompt change: `python -m evals.run` (see
