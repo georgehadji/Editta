@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
+from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.models import CachePolicy, ClaimedJob, LLMResult, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
@@ -49,7 +50,22 @@ class BlobStore(Protocol):
     def get(self, key: str) -> AsyncIterator[bytes]: ...
 
     async def delete_prefix(self, prefix: str) -> None: ...
-    async def presigned_get_url(self, key: str, *, expires_in: int) -> str: ...
+    # `download_name` makes the browser save the object under that name instead of
+    # rendering it (Content-Disposition: attachment); stores without URLs ignore it.
+    async def presigned_get_url(
+        self, key: str, *, expires_in: int, download_name: str | None = None
+    ) -> str: ...
+
+
+class ArtifactExporter(Protocol):
+    """Builds one output file of a job. Sync and CPU-bound: the runner calls it in a
+    worker thread under a timeout, because some exporters walk attacker-shaped files."""
+
+    kind: ArtifactKind
+
+    def build(self, ctx: ExportContext) -> bytes | None:
+        """The file's bytes, or None when this artifact does not apply to the job."""
+        ...
 
 
 class EmailSender(Protocol):

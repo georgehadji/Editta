@@ -36,5 +36,7 @@ class LocalBlobStore:
         elif target.exists():
             target.unlink()
 
-    async def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
+    async def presigned_get_url(
+        self, key: str, *, expires_in: int = 3600, download_name: str | None = None
+    ) -> str:
         return self._path(key).as_uri()

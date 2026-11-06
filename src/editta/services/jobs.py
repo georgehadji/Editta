@@ -36,7 +36,7 @@ from uuid import UUID
 import structlog
 from pydantic import BaseModel
 
-from editta.adapters.export.docx_builder import ReportDocxBuilder
+from editta.adapters.export.docx_builder import ReportExporter
 from editta.adapters.parsing import parse_manuscript
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
@@ -45,6 +45,7 @@ from editta.adapters.persistence.repositories import (
     PassResultRepository,
     ReportRepository,
 )
+from editta.domain.artifacts import ArtifactKind, ExportContext, artifact_blob_key
 from editta.domain.credits import refund_key, reservation_key
 from editta.domain.errors import EdittaError, LeaseLost, LLMError, ParseError
 from editta.domain.models import (
@@ -54,13 +55,11 @@ from editta.domain.models import (
     JobOutcome,
     LLMResult,
     LLMUsage,
-    ManuscriptText,
     PassResult,
     PromptParts,
     SynthesisReport,
 )
-from editta.domain.ports import BlobStore, LLMClient
-from editta.domain.report import assemble_report
+from editta.domain.ports import ArtifactExporter, BlobStore, LLMClient
 from editta.domain.states import JobState, attempts_exhausted, decide_after_failure
 from editta.services.analysis import ANALYSIS_PASSES, preflight, run_passes, run_synthesis
 
@@ -119,14 +118,13 @@ JobUnitOfWork = Callable[[], AbstractAsyncContextManager[JobRepositories]]
 SYNTHESIS_CHECKPOINT = "synthesis"
 # Far past any honest 25 MB manuscript; a hostile file must not hold the worker forever.
 PARSE_TIMEOUT_SECONDS = 120.0
+# Exporters build files from the model's output and, later, re-open the author's own file.
+EXPORT_TIMEOUT_SECONDS = 120.0
+DEFAULT_EXPORTERS: tuple[ArtifactExporter, ...] = (ReportExporter(),)
 
 
 def _pass_checkpoint_key(job_id: UUID, pass_name: str) -> str:
     return f"jobs/{job_id}/passes/{pass_name}.json"
-
-
-def _report_key(job_id: UUID) -> str:
-    return f"jobs/{job_id}/report.docx"
 
 
 def _error_message(exc: BaseException) -> str:
@@ -152,11 +150,13 @@ class JobRunner:
         blobs: BlobStore,
         llm: LLMClient,
         cost_ceiling_usd: float,
+        exporters: tuple[ArtifactExporter, ...] = DEFAULT_EXPORTERS,
     ) -> None:
         self._uow = uow
         self._blobs = blobs
         self._llm = llm
         self._cost_ceiling_usd = cost_ceiling_usd
+        self._exporters = exporters
 
     async def run(self, job: ClaimedJob) -> JobOutcome:
         if attempts_exhausted(job.attempt):
@@ -251,13 +251,17 @@ class JobRunner:
 
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.EXPORTING)
-        report_key = await self._export_report(job.job_id, manuscript, pass_results, synthesis)
+        context = ExportContext(
+            manuscript=manuscript, pass_results=tuple(pass_results), synthesis=synthesis
+        )
+        artifacts = await self._export_artifacts(job.job_id, context)
 
-        # Report row + COMPLETED commit together: a report never exists for a job that
-        # isn't complete, and a complete job always has its report. Fenced: if the lease
-        # was lost, the transaction rolls back and the report row is not created.
+        # Every artifact row + COMPLETED commit together: an artifact never exists for a
+        # job that isn't complete, and a complete job always has all of them. Fenced: if
+        # the lease was lost, the transaction rolls back and no row is created.
         async with self._uow() as repos:
-            await repos.reports.create(job_id=job.job_id, blob_key=report_key)
+            for kind, blob_key in artifacts:
+                await repos.reports.create(job_id=job.job_id, kind=kind, blob_key=blob_key)
             await self._set_state(repos, job, JobState.COMPLETED)
 
     async def _checkpoint(self, job: ClaimedJob, result: PassResult) -> None:
@@ -318,22 +322,24 @@ class JobRunner:
             model=model,
         )
 
-    async def _export_report(
-        self,
-        job_id: UUID,
-        manuscript: ManuscriptText,
-        pass_results: list[PassResult],
-        synthesis: SynthesisReport,
-    ) -> str:
-        report = assemble_report(
-            manuscript_filename=manuscript.source_filename,
-            pass_results=pass_results,
-            synthesis=synthesis,
-        )
-        blob_key = _report_key(job_id)
-        docx_bytes = await asyncio.to_thread(ReportDocxBuilder(report).build)
-        await self._blobs.put(blob_key, _single_chunk(docx_bytes))
-        return blob_key
+    async def _export_artifacts(
+        self, job_id: UUID, context: ExportContext
+    ) -> list[tuple[ArtifactKind, str]]:
+        """Build and store every file of the job; blobs first, rows are the caller's."""
+        stored: list[tuple[ArtifactKind, str]] = []
+        for exporter in self._exporters:
+            try:
+                data = await asyncio.wait_for(
+                    asyncio.to_thread(exporter.build, context), timeout=EXPORT_TIMEOUT_SECONDS
+                )
+            except TimeoutError as exc:
+                raise EdittaError(f"{exporter.kind.value} export took too long") from exc
+            if data is None:  # does not apply to this job
+                continue
+            blob_key = artifact_blob_key(job_id, exporter.kind)
+            await self._blobs.put(blob_key, _single_chunk(data))
+            stored.append((exporter.kind, blob_key))
+        return stored
 
     # --- failure path -----------------------------------------------------------
 

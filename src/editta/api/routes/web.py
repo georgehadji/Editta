@@ -48,6 +48,7 @@ from editta.api.deps import (
 )
 from editta.api.middleware import SIGN_IN_LINK_LIMIT, limiter, new_csrf_cookie_value, verify_csrf
 from editta.config import Settings
+from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore, EmailSender
 from editta.services.accounts import (
@@ -325,12 +326,14 @@ async def upload_via_web(
     )
 
 
-@router.get("/t/{tenant_id}/jobs/{job_id}/download")
-async def download_report(
+@router.get("/t/{tenant_id}/jobs/{job_id}/artifacts/{kind}")
+async def download_artifact(
     tenant_id: UUID,
     job_id: UUID,
+    kind: ArtifactKind,
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
@@ -340,8 +343,10 @@ async def download_report(
         download = await report_download(
             tenant_id=tenant_id,
             job_id=job_id,
+            kind=kind,
             actor=auth.email,
             jobs=jobs,
+            manuscripts=manuscripts,
             reports=reports,
             audit=audit,
             blobs=blobs,
@@ -349,3 +354,20 @@ async def download_report(
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return RedirectResponse(download.url)
+
+
+@router.get("/t/{tenant_id}/jobs/{job_id}/download")
+async def download_report(
+    tenant_id: UUID,
+    job_id: UUID,
+    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
+    audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
+    blobs: Annotated[BlobStore, Depends(get_blob_store)],
+) -> RedirectResponse:
+    """Kept for the links already on the job list."""
+    return await download_artifact(
+        tenant_id, job_id, ArtifactKind.REPORT, auth, jobs, manuscripts, reports, audit, blobs
+    )

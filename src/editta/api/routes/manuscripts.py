@@ -33,6 +33,7 @@ from editta.api.schemas import (
     ReportDownloadResponse,
 )
 from editta.config import Settings
+from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore
 from editta.services.reports import report_download
@@ -89,11 +90,13 @@ async def get_job_status(
     return Envelope.ok(JobStatusResponse(job_id=job.id, state=job.state, error=job.error))
 
 
-@router.get("/jobs/{job_id}/report")
-async def get_report_download_url(
+@router.get("/jobs/{job_id}/artifacts/{kind}")
+async def get_artifact_download_url(
     job_id: UUID,
+    kind: ArtifactKind,  # anything but a known kind is a 422 before any lookup
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
     blobs: Annotated[BlobStore, Depends(get_blob_store)],
@@ -102,8 +105,10 @@ async def get_report_download_url(
         download = await report_download(
             tenant_id=auth.tenant_id,
             job_id=job_id,
+            kind=kind,
             actor=auth.email,
             jobs=jobs,
+            manuscripts=manuscripts,
             reports=reports,
             audit=audit,
             blobs=blobs,
@@ -111,3 +116,19 @@ async def get_report_download_url(
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return Envelope.ok(ReportDownloadResponse(url=download.url, expires_in=download.expires_in))
+
+
+@router.get("/jobs/{job_id}/report")
+async def get_report_download_url(
+    job_id: UUID,
+    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
+    audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
+    blobs: Annotated[BlobStore, Depends(get_blob_store)],
+) -> Envelope[ReportDownloadResponse]:
+    """Kept for existing clients: the report is one artifact kind among several."""
+    return await get_artifact_download_url(
+        job_id, ArtifactKind.REPORT, auth, jobs, manuscripts, reports, audit, blobs
+    )

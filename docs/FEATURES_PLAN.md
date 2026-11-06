@@ -93,6 +93,13 @@ PROFILES: Mapping[JobKind, JobProfile] = MappingProxyType({...})
 
 ### 1.3 Migration 0006
 
+> **As built (PR 1):** migration 0006 is `reports.kind` and the `(job_id, kind)` unique
+> constraint only. `analysis_jobs.kind` ships with the job profiles (PR 6) and
+> `analysis_jobs.batch_id` with batch mode (PR 7), each in its own migration, so no column
+> exists before something writes it. `ArtifactKind` has the members that exist
+> (`REPORT`); each feature PR adds its own. `reports.kind` has no CHECK: only the worker
+> writes it, from the enum, and the download route validates the enum first.
+
 - `analysis_jobs.kind text not null default 'editorial'` + CHECK on the enum values.
 - `analysis_jobs.batch_id text null` (F2 batch mode).
 - `reports.kind text not null default 'report'`; replace the unique constraint on

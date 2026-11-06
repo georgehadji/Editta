@@ -6,7 +6,9 @@ import io
 
 import docx
 
+from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.models import Finding, Report
+from editta.domain.report import assemble_report
 
 
 class ReportDocxBuilder:
@@ -51,3 +53,17 @@ class ReportDocxBuilder:
             bullet.add_run(finding.issue)
             self._document.add_paragraph(f'"{finding.quote}"', style="Intense Quote")
             self._document.add_paragraph(f"Suggestion: {finding.suggestion}")
+
+
+class ReportExporter:
+    """The editorial report as an ArtifactExporter (domain/ports.py)."""
+
+    kind = ArtifactKind.REPORT
+
+    def build(self, ctx: ExportContext) -> bytes | None:
+        report = assemble_report(
+            manuscript_filename=ctx.manuscript.source_filename,
+            pass_results=list(ctx.pass_results),
+            synthesis=ctx.synthesis,
+        )
+        return ReportDocxBuilder(report).build()
