@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
+from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import LeaseLost
 from editta.domain.states import JobState
 
@@ -187,28 +188,31 @@ class FakePassResultRepo:
 
 
 class _ReportRecord:
-    def __init__(self, job_id: UUID, blob_key: str) -> None:
+    def __init__(
+        self, job_id: UUID, blob_key: str, kind: ArtifactKind = ArtifactKind.REPORT
+    ) -> None:
         self.id = uuid4()
         self.job_id = job_id
+        self.kind = kind
         self.blob_key = blob_key
 
 
 class FakeReportRepo:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
-        self._records: dict[UUID, _ReportRecord] = {}
+        self._records: dict[tuple[UUID, ArtifactKind], _ReportRecord] = {}
 
-    async def create(self, *, job_id: UUID, blob_key: str) -> None:
-        # Mirrors the real repo's upsert-on-job_id: never more than one row per job.
-        self._records[job_id] = _ReportRecord(job_id, blob_key)
-        self.created.append({"job_id": job_id, "blob_key": blob_key})
+    async def create(self, *, job_id: UUID, kind: ArtifactKind, blob_key: str) -> None:
+        # Mirrors the real repo's upsert-on-(job_id, kind): one row per file of a job.
+        self._records[(job_id, kind)] = _ReportRecord(job_id, blob_key, kind)
+        self.created.append({"job_id": job_id, "kind": kind, "blob_key": blob_key})
 
-    async def get_by_job_id(self, job_id: UUID) -> _ReportRecord | None:
-        return self._records.get(job_id)
+    async def get(self, job_id: UUID, kind: ArtifactKind) -> _ReportRecord | None:
+        return self._records.get((job_id, kind))
 
     async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
-        for job_id in job_ids:
-            self._records.pop(job_id, None)
+        for key in [k for k in self._records if k[0] in job_ids]:
+            del self._records[key]
 
 
 class FakeLedgerRepo:
@@ -264,6 +268,7 @@ class FakeAuditRepo:
 class FakeBlobStore:
     def __init__(self) -> None:
         self._data: dict[str, bytes] = {}
+        self.download_names: list[str | None] = []
 
     def seed(self, key: str, data: bytes) -> None:
         self._data[key] = data
@@ -278,7 +283,10 @@ class FakeBlobStore:
         for key in [k for k in self._data if k.startswith(prefix)]:
             del self._data[key]
 
-    async def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
+    async def presigned_get_url(
+        self, key: str, *, expires_in: int = 3600, download_name: str | None = None
+    ) -> str:
+        self.download_names.append(download_name)
         return f"fake://{key}"
 
 

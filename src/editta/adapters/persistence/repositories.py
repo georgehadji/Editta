@@ -21,6 +21,7 @@ from editta.adapters.persistence.tables import (
     Tenant,
     User,
 )
+from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import EdittaError, LeaseLost
 
 MANUSCRIPT_PURGED = "purged"
@@ -257,19 +258,21 @@ class ReportRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create(self, *, job_id: UUID, blob_key: str) -> None:
-        """Idempotent on job_id (UNIQUE): an export retried after a crash re-points the
+    async def create(self, *, job_id: UUID, kind: ArtifactKind, blob_key: str) -> None:
+        """Idempotent on (job_id, kind): an export retried after a crash re-points the
         existing row at the freshly written blob instead of violating the constraint."""
-        stmt = pg_insert(Report).values(id=uuid4(), job_id=job_id, blob_key=blob_key)
+        stmt = pg_insert(Report).values(
+            id=uuid4(), job_id=job_id, kind=kind.value, blob_key=blob_key
+        )
         await self._session.execute(
             stmt.on_conflict_do_update(
-                index_elements=[Report.job_id],
+                index_elements=[Report.job_id, Report.kind],
                 set_={"blob_key": stmt.excluded.blob_key},
             )
         )
 
-    async def get_by_job_id(self, job_id: UUID) -> Report | None:
-        stmt = select(Report).where(Report.job_id == job_id)
+    async def get(self, job_id: UUID, kind: ArtifactKind) -> Report | None:
+        stmt = select(Report).where(Report.job_id == job_id, Report.kind == kind.value)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def delete_for_jobs(self, job_ids: list[UUID]) -> None:

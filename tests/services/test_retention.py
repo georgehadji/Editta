@@ -4,7 +4,8 @@ from uuid import uuid4
 
 import pytest
 
-from editta.services.jobs import _pass_checkpoint_key, _report_key
+from editta.domain.artifacts import ArtifactKind, artifact_blob_key
+from editta.services.jobs import _pass_checkpoint_key
 from editta.services.retention import RetentionRepositories, purge_expired
 from tests.services.fakes import (
     FakeAnalysisJobRepo,
@@ -48,11 +49,11 @@ class World:
         job = self.jobs.seed(tenant_id, uuid4(), manuscript_id, lease_owner=None)
         checkpoint = _pass_checkpoint_key(job.id, "language")
         synthesis = _pass_checkpoint_key(job.id, "synthesis")
-        report = _report_key(job.id)
+        report = artifact_blob_key(job.id, ArtifactKind.REPORT)
         for key in (source, checkpoint, synthesis, report):
             self.blobs.seed(key, b"quotes from the manuscript")
         self.pass_results.seed(_PassResultRecord(job.id, "language", checkpoint, "m", {}))
-        self.reports._records[job.id] = _ReportRecord(job.id, report)
+        self.reports._records[(job.id, ArtifactKind.REPORT)] = _ReportRecord(job.id, report)
         return tenant_id, manuscript_id, job.id, source, checkpoint, synthesis, report
 
 
@@ -70,7 +71,7 @@ async def test_purge_removes_source_checkpoints_and_report_but_keeps_the_record(
     assert checkpoint not in world.blobs._data and synthesis not in world.blobs._data
     # The report quotes the manuscript too, and nothing else would ever delete it.
     assert report not in world.blobs._data
-    assert await world.reports.get_by_job_id(job_id) is None
+    assert await world.reports.get(job_id, ArtifactKind.REPORT) is None
     assert await world.pass_results.list_for_job(job_id) == []
     record = await world.manuscripts.get_by_id(tenant_id, manuscript_id)
     assert record is not None and record.status == "purged" and record.blob_key == ""

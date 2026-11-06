@@ -24,7 +24,8 @@ from uuid import UUID, uuid4
 import docx
 import pytest
 import pytest_asyncio
-from sqlalchemy import make_url, text
+from sqlalchemy import make_url, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from editta.adapters.persistence.repositories import (
@@ -38,9 +39,11 @@ from editta.adapters.persistence.repositories import (
     UserRepository,
 )
 from editta.adapters.persistence.roles import MisconfiguredRole, require_rls_bypass
+from editta.adapters.persistence.tables import Report
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import PostgresJobQueue
 from editta.adapters.storage.local import LocalBlobStore
+from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, LeaseLost, LLMError, ParseError
 from editta.domain.models import JobOutcomeKind, PromptParts
 from editta.domain.states import JobState
@@ -109,7 +112,7 @@ async def _admin_exec(admin_url: str, *statements: str) -> None:
     await admin.dispose()
 
 
-def _migrate(app_url: str) -> None:
+def _migrate(app_url: str, *, revision: str = "head", down: bool = False) -> None:
     from alembic import command
     from alembic.config import Config
 
@@ -119,7 +122,7 @@ def _migrate(app_url: str) -> None:
     os.environ["EDITTA_DATABASE_URL"] = app_url
     os.environ["EDITTA_WORKER_DB_PASSWORD"] = _ROLE_PASSWORD
     try:
-        command.upgrade(config, "head")
+        (command.downgrade if down else command.upgrade)(config, revision)
     finally:
         for key, value in previous.items():
             if value is None:
@@ -384,7 +387,7 @@ async def test_a_worker_that_lost_its_lease_cannot_write_release_or_defer(
 
 
 @pytest.mark.asyncio
-async def test_report_create_is_idempotent_per_job(
+async def test_report_create_is_idempotent_per_job_and_kind(
     pg_session_factory: async_sessionmaker[AsyncSession],
     pg_worker_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -393,11 +396,58 @@ async def test_report_create_is_idempotent_per_job(
 
     for key in ("jobs/a/report.docx", "jobs/b/report.docx"):
         async with uow.begin(tenant_id) as session:
-            await ReportRepository(session).create(job_id=job_id, blob_key=key)
+            await ReportRepository(session).create(
+                job_id=job_id, kind=ArtifactKind.REPORT, blob_key=key
+            )
 
     async with uow.begin(tenant_id) as session:
-        report = await ReportRepository(session).get_by_job_id(job_id)
+        report = await ReportRepository(session).get(job_id, ArtifactKind.REPORT)
         assert report is not None and report.blob_key == "jobs/b/report.docx"
+
+
+@pytest.mark.asyncio
+async def test_a_job_may_have_one_row_per_kind_but_not_two_of_a_kind(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Migration 0006: UNIQUE(job_id) became UNIQUE(job_id, kind). Kinds beyond REPORT
+    arrive with later features, so the row is inserted directly."""
+    tenant_id, _, job_id = await _seed_job(pg_worker_factory)
+    uow = UnitOfWork(pg_session_factory)
+
+    async with uow.begin(tenant_id) as session:
+        await ReportRepository(session).create(
+            job_id=job_id, kind=ArtifactKind.REPORT, blob_key="jobs/x/report.docx"
+        )
+        await session.execute(
+            pg_insert(Report).values(
+                id=uuid4(), job_id=job_id, kind="annotated_manuscript", blob_key="jobs/x/a.docx"
+            )
+        )
+    async with uow.begin(tenant_id) as session:
+        kinds = (
+            await session.execute(select(Report.kind).where(Report.job_id == job_id))
+        ).scalars()
+        assert sorted(kinds) == ["annotated_manuscript", "report"]
+
+
+@pytest.mark.asyncio
+async def test_migration_0006_round_trips_and_keeps_existing_reports_as_kind_report(
+    pg: Databases,
+) -> None:
+    app_url = pg.app.kw["bind"].url.render_as_string(hide_password=False)
+
+    await asyncio.to_thread(_migrate, app_url, revision="0005", down=True)
+    await asyncio.to_thread(_migrate, app_url)
+
+    async with pg.worker() as session:
+        columns = await session.execute(
+            text(
+                "select column_default from information_schema.columns "
+                "where table_name = 'reports' and column_name = 'kind'"
+            )
+        )
+        assert "report" in columns.scalar_one()
 
 
 @pytest.mark.asyncio
@@ -458,7 +508,7 @@ async def test_failed_attempt_keeps_checkpoints_and_retry_completes_on_real_db(
     async with uow.begin(tenant_id) as session:
         job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
         assert job is not None and job.state == JobState.COMPLETED
-        assert await ReportRepository(session).get_by_job_id(job_id) is not None
+        assert await ReportRepository(session).get(job_id, ArtifactKind.REPORT) is not None
         assert await CreditLedgerRepository(session).balance(tenant_id) == -1
 
 
@@ -636,7 +686,8 @@ async def test_retention_purges_an_analysed_manuscript_on_real_db(
         pg_worker_factory, blob_key="t/manuscripts/m/source", title="essay.docx"
     )
     checkpoint = f"jobs/{job_id}/passes/language.json"
-    for key in ("t/manuscripts/m/source", checkpoint, f"jobs/{job_id}/report.docx"):
+    extra = f"jobs/{job_id}/annotated_manuscript.docx"
+    for key in ("t/manuscripts/m/source", checkpoint, f"jobs/{job_id}/report.docx", extra):
         await blobs.put(key, _chunk(b"quoted manuscript text"))
     uow = UnitOfWork(pg_session_factory)
     async with uow.begin(tenant_id) as session:
@@ -647,7 +698,18 @@ async def test_retention_purges_an_analysed_manuscript_on_real_db(
             model="m",
             usage={},
         )
-        await ReportRepository(session).create(job_id=job_id, blob_key=f"jobs/{job_id}/report.docx")
+        await ReportRepository(session).create(
+            job_id=job_id, kind=ArtifactKind.REPORT, blob_key=f"jobs/{job_id}/report.docx"
+        )
+        # A further artifact kind (F1's annotated manuscript): same purge, no new code.
+        await session.execute(
+            pg_insert(Report).values(
+                id=uuid4(),
+                job_id=job_id,
+                kind="annotated_manuscript",
+                blob_key=f"jobs/{job_id}/annotated_manuscript.docx",
+            )
+        )
 
     result = await purge_expired(
         retention_unit_of_work(pg_worker_factory), blobs, now=datetime.now(UTC) + timedelta(days=1)
@@ -658,11 +720,14 @@ async def test_retention_purges_an_analysed_manuscript_on_real_db(
     assert not (tmp_path / checkpoint).exists()
     # The report quotes the manuscript too, so retention removes it, file and row.
     assert not (tmp_path / f"jobs/{job_id}/report.docx").exists()
+    assert not (tmp_path / extra).exists()
     async with uow.begin(tenant_id) as session:
         manuscript = await ManuscriptRepository(session).get_by_id(tenant_id, manuscript_id)
         assert manuscript is not None and manuscript.status == "purged"
         assert await PassResultRepository(session).list_for_job(job_id) == []
-        assert await ReportRepository(session).get_by_job_id(job_id) is None
+        assert await ReportRepository(session).get(job_id, ArtifactKind.REPORT) is None
+        remaining = await session.execute(select(Report.id).where(Report.job_id == job_id))
+        assert remaining.first() is None
 
 
 @pytest.mark.asyncio

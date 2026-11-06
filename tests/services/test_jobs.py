@@ -6,10 +6,11 @@ from uuid import uuid4
 import docx
 import pytest
 
+from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, ParseError
 from editta.domain.models import CachePolicy, ClaimedJob, JobOutcomeKind, LLMUsage, PromptParts
 from editta.domain.states import JobState, retry_delay_seconds
-from editta.services.jobs import JobRunner, _pass_checkpoint_key
+from editta.services.jobs import DEFAULT_EXPORTERS, JobRunner, _pass_checkpoint_key
 from tests.fakes import FailureRule, FakeLLMClient
 from tests.services.fakes import FakeBlobStore, FakeJobUnitOfWork, _PassResultRecord
 
@@ -33,6 +34,7 @@ class Harness:
         llm: FakeLLMClient | None = None,
         cost_ceiling_usd: float = 6.0,
         reserved: int | None = 1,
+        exporters: tuple[object, ...] = DEFAULT_EXPORTERS,
     ) -> None:
         self.tenant_id, self.job_id, self.manuscript_id = uuid4(), uuid4(), uuid4()
         self.uow = FakeJobUnitOfWork()
@@ -43,6 +45,7 @@ class Harness:
             blobs=self.blobs,  # type: ignore[arg-type]
             llm=self.llm,
             cost_ceiling_usd=cost_ceiling_usd,
+            exporters=exporters,  # type: ignore[arg-type]
         )
         self.uow.manuscripts.seed(
             self.tenant_id, self.manuscript_id, blob_key="raw/essay", title="essay.docx"
@@ -107,6 +110,55 @@ async def test_happy_path_completes_and_writes_report() -> None:
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []
     assert h.job.cost_input_tokens == 4 * 100  # type: ignore[attr-defined]
+
+
+class _Exporter:
+    kind = ArtifactKind.REPORT
+
+    def __init__(self, result: bytes | None, *, delay: float = 0.0) -> None:
+        self._result, self._delay = result, delay
+
+    def build(self, ctx: ExportContext) -> bytes | None:
+        time.sleep(self._delay)
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_an_exporter_that_does_not_apply_leaves_no_blob_and_no_row() -> None:
+    h = Harness(exporters=(_Exporter(None),))
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.COMPLETED
+    assert h.uow.reports.created == []
+    assert not any(key.endswith("report.docx") for key in h.blobs._data)
+
+
+@pytest.mark.asyncio
+async def test_each_artifact_is_stored_under_a_key_built_from_its_kind() -> None:
+    h = Harness(exporters=(_Exporter(b"file"),))
+
+    await h.runner.run(h.claimed())
+
+    assert h.blobs._data[f"jobs/{h.job_id}/report.docx"] == b"file"
+    assert [(r["kind"], r["blob_key"]) for r in h.uow.reports.created] == [
+        (ArtifactKind.REPORT, f"jobs/{h.job_id}/report.docx")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_exporter_that_never_finishes_ends_the_job_and_refunds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("editta.services.jobs.EXPORT_TIMEOUT_SECONDS", 0.05)
+    h = Harness(exporters=(_Exporter(b"file", delay=0.5),))
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.DEAD
+    assert "report export took too long" in (outcome.error or "")
+    assert h.uow.reports.created == []
+    assert h.ledger("refund") == [1]
 
 
 @pytest.mark.asyncio

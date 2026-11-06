@@ -163,6 +163,21 @@ def test_report_download_before_report_exists_is_not_found(
     assert response.status_code == 404
 
 
+def test_artifact_download_validates_the_kind_before_any_lookup(
+    client: TestClient, harness: Harness
+) -> None:
+    _login(client, harness)
+    job_id = uuid4()
+
+    unknown = client.get(f"/manuscripts/jobs/{job_id}/artifacts/passwd")
+    traversal = client.get(f"/manuscripts/jobs/{job_id}/artifacts/..%2F..%2Fsecret")
+    known = client.get(f"/manuscripts/jobs/{job_id}/artifacts/report")
+
+    assert unknown.status_code == 422
+    assert traversal.status_code in (404, 422)
+    assert known.status_code == 404  # a valid kind reaches the lookup: no such job
+
+
 # --- invite-only access & credits --------------------------------------------------
 
 

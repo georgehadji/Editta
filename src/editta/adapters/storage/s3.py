@@ -3,6 +3,7 @@
 """
 
 from collections.abc import AsyncIterator
+from urllib.parse import quote
 
 import aioboto3
 
@@ -56,9 +57,24 @@ class S3BlobStore:
                     if errors := response.get("Errors"):
                         raise EdittaError(f"{len(errors)} object(s) could not be deleted")
 
-    async def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
+    async def presigned_get_url(
+        self, key: str, *, expires_in: int = 3600, download_name: str | None = None
+    ) -> str:
+        params = {"Bucket": self._bucket, "Key": key}
+        if download_name is not None:
+            params["ResponseContentDisposition"] = attachment_disposition(download_name)
         async with self._session.client("s3", **self._client_kwargs) as client:
             url = await client.generate_presigned_url(
-                "get_object", Params={"Bucket": self._bucket, "Key": key}, ExpiresIn=expires_in
+                "get_object", Params=params, ExpiresIn=expires_in
             )
         return str(url)
+
+
+def attachment_disposition(filename: str) -> str:
+    """`Content-Disposition: attachment` value (RFC 6266 / 5987). `attachment` makes the
+    browser save an uploaded file instead of rendering it; `filename*` carries the real
+    (often Greek) name, the quoted ASCII `filename` is the fallback for old clients."""
+    ascii_name = "".join(
+        c if c.isascii() and c.isprintable() and c not in '"\\;' else "_" for c in filename
+    )
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"

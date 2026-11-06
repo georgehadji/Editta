@@ -90,11 +90,14 @@ class PassResult(UUIDPKMixin, TimestampMixin, Base):
 
 
 class Report(UUIDPKMixin, TimestampMixin, Base):
-    __tablename__ = "reports"
+    """One row per output file of a job (domain/artifacts.py). Named `reports` since the
+    report was the only file; authorized through its job, so it has no tenant_id."""
 
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("analysis_jobs.id"), unique=True, index=True
-    )
+    __tablename__ = "reports"
+    __table_args__ = (UniqueConstraint("job_id", "kind", name="uq_reports_job_id_kind"),)
+
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_jobs.id"), index=True)
+    kind: Mapped[str] = mapped_column(server_default="report")
     blob_key: Mapped[str]
     summary_blob_key: Mapped[str | None] = mapped_column(default=None)
 
