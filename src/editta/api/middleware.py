@@ -56,6 +56,11 @@ def _rate_limit_key(request: Request) -> str:
 
 limiter = Limiter(key_func=_rate_limit_key, default_limits=["120/minute"])
 
+# Each sign-in link request can send an email to an inbox that is not the caller's, so it
+# gets a much tighter limit than the default. Keyed per IP like the rest: behind a proxy
+# uvicorn does not trust, that is one bucket for everyone -- see --forwarded-allow-ips.
+SIGN_IN_LINK_LIMIT = "10/minute"
+
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(

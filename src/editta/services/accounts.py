@@ -12,6 +12,8 @@ let anyone who knew a tenant's id read its unpublished manuscripts.
   * `request_login` emails a link only to an existing user and behaves identically
     otherwise, so the endpoint does not reveal which emails have accounts.
   * `complete_login` verifies the signed token and requires the account to still exist.
+    A link works once: confirming it records the sign-in time, and a link issued before
+    that time is refused.
   * `authenticate_session` re-checks the account on every request: removing a user
     revokes their sessions instead of leaving a 30-day cookie valid.
 
@@ -22,6 +24,7 @@ pre-authentication paths are subject to row-level security like everything else.
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -159,15 +162,25 @@ class AccountService:
         return LoginLink(to_email=email, url=login_link(base_url, tenant_id, token))
 
     async def complete_login(
-        self, token: str, *, expected_tenant_id: UUID | None = None
+        self, token: str, *, expected_tenant_id: UUID | None = None, consume: bool = True
     ) -> AuthenticatedUser:
-        tenant_id, email = self.verify_magic_link_token(token)
+        """Verify a sign-in link. `consume=False` only checks it (the page that asks the
+        user to confirm); the confirming request spends it."""
+        tenant_id, email, issued_at = self._open_magic_link_token(token)
         if expected_tenant_id is not None and tenant_id != expected_tenant_id:
             raise InvalidMagicLink("magic link does not match this tenant")
         async with self._users(tenant_id) as users:
             user = await users.get_by_email(tenant_id, email)
-        if user is None:
-            raise InvalidMagicLink("no account for this email in this tenant")
+            if user is None:
+                raise InvalidMagicLink("no account for this email in this tenant")
+            if consume:
+                spent = not await users.consume_login(
+                    tenant_id, user.id, issued_at=issued_at, now=datetime.now(UTC)
+                )
+            else:
+                spent = user.last_login_at is not None and user.last_login_at >= issued_at
+            if spent:
+                raise InvalidMagicLink("magic link was already used")
         return AuthenticatedUser(tenant_id, user.id, user.email, user.role)
 
     async def authenticate_session(self, cookie: str) -> AuthenticatedUser:
@@ -185,13 +198,19 @@ class AccountService:
         return str(self._magic_link_serializer.dumps(payload))
 
     def verify_magic_link_token(self, token: str) -> tuple[UUID, str]:
+        tenant_id, email, _ = self._open_magic_link_token(token)
+        return tenant_id, email
+
+    def _open_magic_link_token(self, token: str) -> tuple[UUID, str, datetime]:
         try:
-            payload = self._magic_link_serializer.loads(token, max_age=MAGIC_LINK_MAX_AGE_SECONDS)
+            payload, issued_at = self._magic_link_serializer.loads(
+                token, max_age=MAGIC_LINK_MAX_AGE_SECONDS, return_timestamp=True
+            )
         except SignatureExpired as exc:
             raise InvalidMagicLink("magic link has expired") from exc
         except BadSignature as exc:
             raise InvalidMagicLink("magic link is invalid") from exc
-        return UUID(payload["tenant_id"]), str(payload["email"])
+        return UUID(payload["tenant_id"]), str(payload["email"]), issued_at
 
     def issue_session_cookie(self, *, tenant_id: UUID, user_id: UUID, email: str) -> str:
         payload = {"tenant_id": str(tenant_id), "user_id": str(user_id), "email": email}

@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -79,6 +79,24 @@ class UserRepository:
     async def get_by_id(self, tenant_id: UUID, user_id: UUID) -> User | None:
         stmt = select(User).where(User.tenant_id == tenant_id, User.id == user_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def consume_login(
+        self, tenant_id: UUID, user_id: UUID, *, issued_at: datetime, now: datetime
+    ) -> bool:
+        """Spend a sign-in link: True only for the first use of a link issued after the
+        user's previous sign-in. One conditional UPDATE, so two concurrent confirmations
+        of the same link race on it and the loser matches no row."""
+        result = await self._session.execute(
+            update(User)
+            .where(
+                User.tenant_id == tenant_id,
+                User.id == user_id,
+                or_(User.last_login_at.is_(None), User.last_login_at < issued_at),
+            )
+            .values(last_login_at=now)
+        )
+        updated: int = result.rowcount  # type: ignore[attr-defined]
+        return updated == 1
 
 
 class ManuscriptRepository:
@@ -253,6 +271,10 @@ class ReportRepository:
     async def get_by_job_id(self, job_id: UUID) -> Report | None:
         stmt = select(Report).where(Report.job_id == job_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
+        if job_ids:
+            await self._session.execute(delete(Report).where(Report.job_id.in_(job_ids)))
 
 
 class CreditLedgerRepository:

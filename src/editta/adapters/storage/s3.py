@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator
 
 import aioboto3
 
+from editta.domain.errors import EdittaError
+
 
 class S3BlobStore:
     def __init__(
@@ -46,7 +48,13 @@ class S3BlobStore:
             async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
                 if keys:
-                    await client.delete_objects(Bucket=self._bucket, Delete={"Objects": keys})
+                    response = await client.delete_objects(
+                        Bucket=self._bucket, Delete={"Objects": keys}
+                    )
+                    # S3 answers 200 even when single keys were refused; the retention
+                    # sweep must not mark content purged that is still there.
+                    if errors := response.get("Errors"):
+                        raise EdittaError(f"{len(errors)} object(s) could not be deleted")
 
     async def presigned_get_url(self, key: str, *, expires_in: int = 3600) -> str:
         async with self._session.client("s3", **self._client_kwargs) as client:

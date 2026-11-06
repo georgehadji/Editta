@@ -46,7 +46,7 @@ from editta.api.deps import (
     get_templates,
     get_tenant_repo,
 )
-from editta.api.middleware import new_csrf_cookie_value, verify_csrf
+from editta.api.middleware import SIGN_IN_LINK_LIMIT, limiter, new_csrf_cookie_value, verify_csrf
 from editta.config import Settings
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore, EmailSender
@@ -102,6 +102,7 @@ async def login_page(
 
 
 @public_router.post("/t/{tenant_id}/login", response_class=HTMLResponse)
+@limiter.limit(SIGN_IN_LINK_LIMIT)
 async def request_login_link(
     request: Request,
     background: BackgroundTasks,
@@ -152,7 +153,10 @@ async def confirm_login_page(
     cannot read or set, so a cross-site form cannot complete a login either.
     """
     try:
-        user = await account_service.complete_login(token, expected_tenant_id=tenant_id)
+        # Check only: the confirming POST below spends the link.
+        user = await account_service.complete_login(
+            token, expected_tenant_id=tenant_id, consume=False
+        )
     except InvalidMagicLink as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
     nonce = secrets.token_urlsafe(32)

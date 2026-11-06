@@ -23,6 +23,21 @@ def test_load_settings_fails_fast_when_secret_missing(monkeypatch: pytest.Monkey
         load_settings()
 
 
+def test_a_short_session_secret_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It signs sessions and sign-in links: a guessable one lets anyone sign in as anyone."""
+    monkeypatch.setenv("EDITTA_SESSION_SECRET", "too-short")
+
+    with pytest.raises(ValueError, match="session_secret"):
+        load_settings()
+
+
+def test_the_example_env_placeholder_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EDITTA_SESSION_SECRET", "change-me-to-a-random-64-char-value")
+
+    with pytest.raises(ValueError, match="placeholder"):
+        load_settings()
+
+
 def test_an_openrouter_key_alone_is_enough(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EDITTA_ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("EDITTA_OPENROUTER_API_KEY", "or-key")

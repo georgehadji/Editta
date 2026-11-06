@@ -656,12 +656,13 @@ async def test_retention_purges_an_analysed_manuscript_on_real_db(
     assert (result.purged, result.failed) == (1, 0)
     assert not (tmp_path / "t/manuscripts/m/source").exists()
     assert not (tmp_path / checkpoint).exists()
-    assert (tmp_path / f"jobs/{job_id}/report.docx").exists()
+    # The report quotes the manuscript too, so retention removes it, file and row.
+    assert not (tmp_path / f"jobs/{job_id}/report.docx").exists()
     async with uow.begin(tenant_id) as session:
         manuscript = await ManuscriptRepository(session).get_by_id(tenant_id, manuscript_id)
         assert manuscript is not None and manuscript.status == "purged"
         assert await PassResultRepository(session).list_for_job(job_id) == []
-        assert await ReportRepository(session).get_by_job_id(job_id) is not None
+        assert await ReportRepository(session).get_by_job_id(job_id) is None
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ browser-facing HTML flow). Invite-only: see services/accounts.py for the access 
 
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 
 from editta.api.deps import (
     SESSION_COOKIE_NAME,
@@ -14,7 +14,7 @@ from editta.api.deps import (
     get_email_sender,
     get_settings,
 )
-from editta.api.middleware import new_csrf_cookie_value, verify_csrf
+from editta.api.middleware import SIGN_IN_LINK_LIMIT, limiter, new_csrf_cookie_value, verify_csrf
 from editta.api.schemas import (
     Envelope,
     InviteRequest,
@@ -37,7 +37,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/magic-link", status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit(SIGN_IN_LINK_LIMIT)
 async def request_magic_link(
+    request: Request,  # required by the rate limiter
     body: MagicLinkRequest,
     background: BackgroundTasks,
     account_service: Annotated[AccountService, Depends(get_account_service)],

@@ -44,6 +44,9 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     email: Mapped[str]
     role: Mapped[str] = mapped_column(default="editor")
+    # When a sign-in link was last used. A link issued before this moment is spent
+    # (services/accounts.py: links are single-use).
+    last_login_at: Mapped[datetime | None] = mapped_column(default=None)
 
 
 class Manuscript(UUIDPKMixin, TimestampMixin, Base):

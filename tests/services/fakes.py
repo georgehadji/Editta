@@ -206,6 +206,10 @@ class FakeReportRepo:
     async def get_by_job_id(self, job_id: UUID) -> _ReportRecord | None:
         return self._records.get(job_id)
 
+    async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
+        for job_id in job_ids:
+            self._records.pop(job_id, None)
+
 
 class FakeLedgerRepo:
     def __init__(self) -> None:
@@ -310,10 +314,25 @@ class FakeUserRepo:
         )
 
     async def create(self, *, tenant_id: UUID, email: str, role: str = "editor") -> Any:
-        attrs = {"id": uuid4(), "tenant_id": tenant_id, "email": email, "role": role}
+        attrs = {
+            "id": uuid4(),
+            "tenant_id": tenant_id,
+            "email": email,
+            "role": role,
+            "last_login_at": None,
+        }
         user = type("User", (), attrs)()
         self._by_email[(tenant_id, email)] = user
         return user
+
+    async def consume_login(
+        self, tenant_id: UUID, user_id: UUID, *, issued_at: Any, now: Any
+    ) -> bool:
+        user = await self.get_by_id(tenant_id, user_id)
+        if user is None or (user.last_login_at is not None and user.last_login_at >= issued_at):
+            return False
+        user.last_login_at = now
+        return True
 
     def remove(self, tenant_id: UUID, email: str) -> None:
         del self._by_email[(tenant_id, email)]

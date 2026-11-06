@@ -250,8 +250,7 @@ Manuscripts are unpublished intellectual property — confidentiality is the pro
 
 **Data protection:**
 - TLS everywhere; SSE on object storage; EU-region hosting; DPA with subprocessors.
-- **Retention:** manuscript content auto-purged after a configurable window (default 30 days) — the source file, every analysis checkpoint (they quote the text) and their rows; the manuscript row is kept, marked `purged`, because jobs and reports reference it. Storage is deleted before the record is marked, so a failure is retried, never left behind (`services/retention.py`). Reports kept until tenant deletes.
-- Manuscript text **never** appears in logs, error messages, or Sentry payloads (scrubbing middleware); LLM calls run under the API's standard no-training terms.
+- **Retention:** manuscript content auto-purged after a configurable window (default 30 days) — the source file, every analysis checkpoint and the final report (all of them quote the text) and their rows; the manuscript row and its jobs are kept, marked `purged`, because the credit ledger and audit trail reference them. Storage is deleted before the record is marked, so a failure is retried, never left behind (`services/retention.py`).- Manuscript text **never** appears in logs, error messages, or Sentry payloads (scrubbing middleware); LLM calls run under the API's standard no-training terms.
 - Secrets via environment/secret manager only; `config.py` fails fast at startup if any are missing.
 - **Worker database role:** the queue and the retention sweep must connect as the BYPASSRLS `editta_worker` role (`EDITTA_WORKER_DATABASE_URL`); with RLS forced, any other role sees no rows. Both refuse to start otherwise. **Deploy order for migration 0004:** ship the code first, then migrate — older code's unscoped login lookups stop working once RLS is forced.
 

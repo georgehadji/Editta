@@ -1,4 +1,5 @@
 import io
+import time
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
@@ -116,6 +117,26 @@ async def test_runner_never_touches_the_ledger_for_a_successful_job() -> None:
 
     assert outcome.kind is JobOutcomeKind.COMPLETED
     assert h.uow.ledger.entries == []
+
+
+@pytest.mark.asyncio
+async def test_a_manuscript_that_never_finishes_parsing_ends_the_job_and_refunds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile file must not hold the worker (and its lease) forever."""
+
+    def never_in_time(data: bytes, title: str) -> None:
+        time.sleep(0.5)
+
+    monkeypatch.setattr("editta.services.jobs.parse_manuscript", never_in_time)
+    monkeypatch.setattr("editta.services.jobs.PARSE_TIMEOUT_SECONDS", 0.05)
+    h = Harness()
+
+    outcome = await h.runner.run(h.claimed())
+
+    assert outcome.kind is JobOutcomeKind.DEAD
+    assert outcome.error == "manuscript took too long to parse"
+    assert h.ledger("refund") == [1]
 
 
 @pytest.mark.asyncio
