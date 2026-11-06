@@ -106,7 +106,10 @@ async def test_happy_path_completes_and_writes_report() -> None:
         "integrity",
         "synthesis",
     }
-    assert len(h.uow.reports.created) == 1
+    assert {r["kind"] for r in h.uow.reports.created} == {
+        ArtifactKind.REPORT,
+        ArtifactKind.ANNOTATED_MANUSCRIPT,
+    }
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []
     assert h.job.cost_input_tokens == 4 * 100  # type: ignore[attr-defined]

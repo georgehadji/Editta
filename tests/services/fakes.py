@@ -210,6 +210,13 @@ class FakeReportRepo:
     async def get(self, job_id: UUID, kind: ArtifactKind) -> _ReportRecord | None:
         return self._records.get((job_id, kind))
 
+    async def kinds_by_job(self, job_ids: list[UUID]) -> dict[UUID, set[str]]:
+        found: dict[UUID, set[str]] = {}
+        for job_id, kind in self._records:
+            if job_id in job_ids:
+                found.setdefault(job_id, set()).add(kind.value)
+        return found
+
     async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
         for key in [k for k in self._records if k[0] in job_ids]:
             del self._records[key]

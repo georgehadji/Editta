@@ -19,6 +19,15 @@ def test_blob_key_is_built_from_the_job_and_the_kind_only() -> None:
     assert artifact_content_type(ArtifactKind.REPORT) == DOCX_CONTENT_TYPE
 
 
+def test_the_commented_manuscript_has_its_own_key_and_download_name() -> None:
+    job_id = uuid4()
+    kind = ArtifactKind.ANNOTATED_MANUSCRIPT
+
+    assert artifact_blob_key(job_id, kind) == f"jobs/{job_id}/annotated_manuscript.docx"
+    assert artifact_content_type(kind) == DOCX_CONTENT_TYPE
+    assert artifact_filename("Το βιβλίο.docx", kind) == "Το βιβλίο-editta-comments.docx"
+
+
 @pytest.mark.parametrize(
     ("title", "expected"),
     [

@@ -20,6 +20,7 @@ _SOURCE_EXTENSION = re.compile(r"\.(docx|pdf)$", re.IGNORECASE)
 
 class ArtifactKind(StrEnum):
     REPORT = "report"
+    ANNOTATED_MANUSCRIPT = "annotated_manuscript"
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +31,12 @@ class _ArtifactSpec:
 
 
 _SPECS: Mapping[ArtifactKind, _ArtifactSpec] = MappingProxyType(
-    {ArtifactKind.REPORT: _ArtifactSpec("docx", DOCX_CONTENT_TYPE, "-editta-report")}
+    {
+        ArtifactKind.REPORT: _ArtifactSpec("docx", DOCX_CONTENT_TYPE, "-editta-report"),
+        ArtifactKind.ANNOTATED_MANUSCRIPT: _ArtifactSpec(
+            "docx", DOCX_CONTENT_TYPE, "-editta-comments"
+        ),
+    }
 )
 
 
@@ -57,5 +63,6 @@ class ExportContext:
     next one sees."""
 
     manuscript: ManuscriptText
+    source: bytes  # the author's file as uploaded, for exporters that annotate it
     pass_results: tuple[PassResult, ...]
     synthesis: SynthesisReport

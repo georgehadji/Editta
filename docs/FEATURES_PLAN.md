@@ -181,6 +181,27 @@ only writes XML.
   need a Word file. PDF annotations are a separate, later decision.
 - Part of the editorial profile. Zero tokens; CPU only, bounded by the exporter timeout.
 
+> **As built (PR 2):**
+> - `locate_quote(quote, source: MappedText)` takes the output of `normalize_with_map`, so
+>   many quotes are located against one normalization. `normalize_text` is **not** made a
+>   wrapper of `normalize_with_map`: it runs on the event loop once per pass and the mapped
+>   version is several times slower. A test pins that both give the same text on tricky and
+>   random input, and `place_findings` re-checks it at run time and places nothing on a
+>   mismatch.
+> - `_anchored` is now `_locate(...) is not None`, so "anchored" and "placeable" are one rule.
+> - The map keeps a start *and* an end offset per character (`MappedText`), because NFC and
+>   case folding can turn several characters into one or one into several.
+> - `place_findings` returns finding indexes, not `Finding` objects, so two equal findings
+>   from different passes stay distinct.
+> - The exporter never fails the job: any error inside it logs the exception type and yields
+>   no file. The report is still delivered.
+> - Comment labels are Greek, in one table (`PASS_LABELS`), pending open question 4.
+> - **Not built yet:** the "not placed in the file" appendix in the report (the report and
+>   the commented file are separate exporters; the count is logged as `export.annotated`),
+>   and a hint in the UI that a PDF gets no comments. Neither blocks the feature.
+> - **Known limit:** a field that starts in one paragraph and ends in a later one is not
+>   tracked across the break (marked `shortcut:` in `annotated_docx.py`).
+
 ---
 
 ## 3. F2 — Acquisitions brief (+ overnight batch mode)

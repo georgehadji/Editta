@@ -3,11 +3,19 @@
 import io
 
 import docx
+from docx.document import Document
+from docx.text.paragraph import Paragraph
 
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
 
 _HEADING_PREFIX = "Heading"
+
+
+def docx_body_paragraphs(document: Document) -> list[Paragraph]:
+    """The paragraphs the analysis reads: top-level, with text. One walk for the parser and
+    for the commented export, so the offsets of one are the offsets of the other."""
+    return [p for p in document.paragraphs if p.text.strip()]
 
 
 def extract_docx(data: bytes, filename: str) -> ManuscriptText:
@@ -19,10 +27,8 @@ def extract_docx(data: bytes, filename: str) -> ManuscriptText:
 
     lines: list[str] = []
     sections: list[str] = []
-    for paragraph in document.paragraphs:
+    for paragraph in docx_body_paragraphs(document):
         text = paragraph.text.strip()
-        if not text:
-            continue
         style_name = paragraph.style.name if paragraph.style else ""
         if style_name.startswith(_HEADING_PREFIX):
             sections.append(text)

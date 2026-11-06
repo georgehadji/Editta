@@ -246,11 +246,13 @@ async def dashboard(
     tenant_id: UUID,
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
     ledger: Annotated[CreditLedgerRepository, Depends(get_ledger_repo)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
     job_list = await jobs.list_for_tenant(tenant_id)
+    artifacts = await reports.kinds_by_job([j.id for j in job_list])
     balance = await ledger.balance(tenant_id)
     return templates.TemplateResponse(
         request,
@@ -259,6 +261,7 @@ async def dashboard(
             "tenant_id": tenant_id,
             "email": auth.email,
             "jobs": job_list,
+            "artifacts": artifacts,
             "credit_balance": balance,
             "csrf_token": request.cookies.get("editta_csrf", ""),
         },
@@ -271,13 +274,11 @@ async def jobs_fragment(
     tenant_id: UUID,
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
-    job_list = await jobs.list_for_tenant(tenant_id)
-    return templates.TemplateResponse(
-        request, "_job_list.html", {"tenant_id": tenant_id, "jobs": job_list}
-    )
+    return await _job_list(request, tenant_id, jobs, reports, templates)
 
 
 @router.post("/t/{tenant_id}/upload", response_class=HTMLResponse)
@@ -288,6 +289,7 @@ async def upload_via_web(
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
     tenants: Annotated[TenantRepository, Depends(get_tenant_repo)],
     ledger: Annotated[CreditLedgerRepository, Depends(get_ledger_repo)],
@@ -320,9 +322,22 @@ async def upload_via_web(
         )
         return _upload_error(request, templates, message=str(exc), status_code=code)
 
+    return await _job_list(request, tenant_id, jobs, reports, templates)
+
+
+async def _job_list(
+    request: Request,
+    tenant_id: UUID,
+    jobs: AnalysisJobRepository,
+    reports: ReportRepository,
+    templates: Jinja2Templates,
+) -> HTMLResponse:
     job_list = await jobs.list_for_tenant(tenant_id)
+    artifacts = await reports.kinds_by_job([j.id for j in job_list])
     return templates.TemplateResponse(
-        request, "_job_list.html", {"tenant_id": tenant_id, "jobs": job_list}
+        request,
+        "_job_list.html",
+        {"tenant_id": tenant_id, "jobs": job_list, "artifacts": artifacts},
     )
 
 
