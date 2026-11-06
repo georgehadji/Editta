@@ -1,9 +1,10 @@
 """Retention: purge manuscript content past `retention_until` (PLAN.md §5, GDPR).
 
 What is purged: the uploaded source file, every analysis checkpoint (pass findings and
-the synthesis — they quote the manuscript), and their database rows. What stays: the
-manuscript row itself (marked `purged`, no storage key), its jobs, and the final reports,
-which PLAN.md keeps until the tenant deletes them.
+the synthesis), the final report, and their database rows -- all of them quote the
+manuscript, and no other code path ever deletes a report. What stays: the manuscript row
+itself (marked `purged`, no storage key) and its jobs, which the credit ledger and audit
+trail reference.
 
 The previous sweep tried to delete the manuscript row, which jobs reference by foreign
 key, so it failed on every manuscript that had ever been analysed — after it had already
@@ -27,6 +28,7 @@ from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     ManuscriptRepository,
     PassResultRepository,
+    ReportRepository,
 )
 from editta.domain.ports import BlobStore
 
@@ -38,6 +40,7 @@ class RetentionRepositories:
     manuscripts: ManuscriptRepository
     jobs: AnalysisJobRepository
     pass_results: PassResultRepository
+    reports: ReportRepository
 
 
 # One transaction across tenants — the sweep runs on the BYPASSRLS worker role.
@@ -50,9 +53,10 @@ class SweepResult:
     failed: int
 
 
-def job_checkpoint_prefix(job_id: UUID) -> str:
-    """Pass and synthesis checkpoints (services/jobs.py) — not the report beside them."""
-    return f"jobs/{job_id}/passes/"
+def job_blob_prefix(job_id: UUID) -> str:
+    """Everything stored for a job (services/jobs.py): pass and synthesis checkpoints and
+    the report."""
+    return f"jobs/{job_id}/"
 
 
 async def purge_expired(
@@ -92,8 +96,9 @@ async def _purge_one(
     if blob_key:
         await blobs.delete_prefix(blob_key)
     for job_id in job_ids:
-        await blobs.delete_prefix(job_checkpoint_prefix(job_id))
+        await blobs.delete_prefix(job_blob_prefix(job_id))
 
     async with uow() as repos:
         await repos.pass_results.delete_for_jobs(job_ids)
+        await repos.reports.delete_for_jobs(job_ids)
         await repos.manuscripts.mark_purged(tenant_id, manuscript_id)

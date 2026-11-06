@@ -46,7 +46,7 @@ from editta.adapters.persistence.repositories import (
     ReportRepository,
 )
 from editta.domain.credits import refund_key, reservation_key
-from editta.domain.errors import EdittaError, LeaseLost, LLMError
+from editta.domain.errors import EdittaError, LeaseLost, LLMError, ParseError
 from editta.domain.models import (
     CachePolicy,
     ClaimedJob,
@@ -117,6 +117,8 @@ JobUnitOfWork = Callable[[], AbstractAsyncContextManager[JobRepositories]]
 
 
 SYNTHESIS_CHECKPOINT = "synthesis"
+# Far past any honest 25 MB manuscript; a hostile file must not hold the worker forever.
+PARSE_TIMEOUT_SECONDS = 120.0
 
 
 def _pass_checkpoint_key(job_id: UUID, pass_name: str) -> str:
@@ -208,8 +210,15 @@ class JobRunner:
 
         data = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
         # CPU-bound and attacker-influenced (a crafted PDF can take minutes): off the
-        # event loop, so heartbeats keep the lease alive while it runs.
-        manuscript = await asyncio.to_thread(parse_manuscript, data, title)
+        # event loop, so heartbeats keep the lease alive while it runs -- and bounded. A
+        # thread cannot be cancelled: after a timeout it finishes in the background and
+        # its result is dropped.
+        try:
+            manuscript = await asyncio.wait_for(
+                asyncio.to_thread(parse_manuscript, data, title), timeout=PARSE_TIMEOUT_SECONDS
+            )
+        except TimeoutError as exc:
+            raise ParseError("manuscript took too long to parse") from exc
 
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.ANALYZING)

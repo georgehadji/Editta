@@ -1,6 +1,6 @@
 """Application settings. Fails fast at startup if required secrets are missing."""
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     s3_bucket: str
     s3_access_key: str
     s3_secret_key: str
-    session_secret: str
+    # Signs session cookies and sign-in links: whoever knows it can sign in as anyone.
+    session_secret: str = Field(min_length=32)
 
     # Secure by default: development-only conveniences (console email sender, sign-in
     # links shown on the page) require opting in with EDITTA_ENVIRONMENT=development.
@@ -44,6 +45,13 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str | None = None
     stripe_price_id: str | None = None
     credits_per_purchase: int = 10
+
+    @field_validator("session_secret")
+    @classmethod
+    def _not_the_example_secret(cls, value: str) -> str:
+        if value.startswith("change-me"):  # the placeholder in .env.example
+            raise ValueError("EDITTA_SESSION_SECRET is still the .env.example placeholder")
+        return value
 
     @model_validator(mode="after")
     def _require_an_llm_key(self) -> "Settings":

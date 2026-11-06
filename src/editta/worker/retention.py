@@ -18,6 +18,7 @@ from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     ManuscriptRepository,
     PassResultRepository,
+    ReportRepository,
 )
 from editta.adapters.persistence.roles import require_rls_bypass
 from editta.adapters.storage.s3 import S3BlobStore
@@ -42,6 +43,7 @@ def retention_unit_of_work(
                 manuscripts=ManuscriptRepository(session),
                 jobs=AnalysisJobRepository(session),
                 pass_results=PassResultRepository(session),
+                reports=ReportRepository(session),
             )
 
     return unit

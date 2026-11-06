@@ -54,10 +54,18 @@ def _docx_bytes() -> bytes:
 
 
 class _FakeBillingService(BillingService):
+    ran_on_event_loop: bool | None = None
+
     def __init__(self) -> None:
         pass  # deliberately skip the real __init__ — no Stripe client needed
 
     def create_checkout_session_url(self, *, tenant_id, customer_email) -> str:  # type: ignore[no-untyped-def]
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            _FakeBillingService.ran_on_event_loop = False
+        else:
+            _FakeBillingService.ran_on_event_loop = True
         return "https://checkout.stripe.test/fake"
 
 
@@ -226,6 +234,8 @@ def test_billing_checkout_redirects_to_stripe(client: TestClient) -> None:
 
     assert response.status_code == 303
     assert response.headers["location"] == "https://checkout.stripe.test/fake"
+    # The Stripe SDK call is synchronous: it must not run on (and block) the event loop.
+    assert _FakeBillingService.ran_on_event_loop is False
 
 
 def test_login_page_never_shows_the_link_outside_development(
@@ -248,3 +258,20 @@ def test_unknown_email_sees_the_same_page_and_gets_no_link(client: TestClient) -
 def test_dashboard_without_login_redirects_or_401s(client: TestClient) -> None:
     response = client.get(f"/t/{uuid4()}/dashboard")
     assert response.status_code == 401
+
+
+def test_a_sign_in_link_cannot_be_used_twice(client: TestClient) -> None:
+    link = _emailed_link(client)
+    assert _confirm(client, link).status_code == 200
+    client.cookies.clear()
+
+    assert client.get(link).status_code == 401  # spent: no confirm page for a used link
+
+
+def test_sign_in_link_requests_are_rate_limited(client: TestClient) -> None:
+    """Each request can email a stranger's inbox: far tighter than the 120/min default."""
+    statuses = [
+        client.post(f"/t/{TENANT_ID}/login", data={"email": EDITOR}).status_code for _ in range(11)
+    ]
+
+    assert statuses == [200] * 10 + [429]

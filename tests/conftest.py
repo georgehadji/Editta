@@ -13,7 +13,7 @@ _REQUIRED_ENV = {
     "EDITTA_S3_BUCKET": "editta-test",
     "EDITTA_S3_ACCESS_KEY": "test",
     "EDITTA_S3_SECRET_KEY": "test",
-    "EDITTA_SESSION_SECRET": "test-session-secret",
+    "EDITTA_SESSION_SECRET": "test-session-secret-at-least-32-chars",
 }
 
 
@@ -25,3 +25,11 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key)
     for key, value in _REQUIRED_ENV.items():
         monkeypatch.setenv(key, value)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limits() -> None:
+    # The limiter keeps its counters in module state; a test must not inherit another's.
+    from editta.api.middleware import limiter
+
+    limiter.reset()

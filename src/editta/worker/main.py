@@ -94,7 +94,13 @@ class Worker:
         await require_rls_bypass(self._queue_engine, purpose="the job queue")
         logger.info("worker.started", worker_id=self._worker_id)
         while not self._shutdown.is_set():
-            claimed = await self._claim_one()
+            try:
+                claimed = await self._claim_one()
+            except Exception:
+                # A database blip must not end the worker: poll again after the usual wait,
+                # as the heartbeat loop does.
+                logger.exception("worker.claim_failed", worker_id=self._worker_id)
+                claimed = None
             if claimed is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._shutdown.wait(), timeout=POLL_INTERVAL_SECONDS)

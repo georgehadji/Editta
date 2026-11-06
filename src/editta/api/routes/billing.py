@@ -6,6 +6,7 @@ earliest point tenant is known, so it can't go through the usual get_tenant_sess
 dependency chain, which requires an authenticated request. Stripe isn't logged in.
 """
 
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -24,7 +25,11 @@ async def start_checkout(
     auth: Annotated[AuthContext, Depends(get_current_auth)],
     billing: Annotated[BillingService, Depends(get_billing_service)],
 ) -> RedirectResponse:
-    url = billing.create_checkout_session_url(tenant_id=auth.tenant_id, customer_email=auth.email)
+    # The Stripe SDK call is synchronous: off the event loop, so a slow Stripe cannot
+    # stall every other request on this process.
+    url = await asyncio.to_thread(
+        billing.create_checkout_session_url, tenant_id=auth.tenant_id, customer_email=auth.email
+    )
     return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
 
 

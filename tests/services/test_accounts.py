@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -53,7 +54,7 @@ def test_verify_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
     # that AccountService translates SignatureExpired into our own InvalidMagicLink.
     service = _service()
 
-    def _raise_expired(token: str, max_age: int) -> None:
+    def _raise_expired(token: str, max_age: int, **_: object) -> None:
         raise SignatureExpired("token is stale")
 
     monkeypatch.setattr(service._magic_link_serializer, "loads", _raise_expired)
@@ -189,3 +190,53 @@ async def test_bootstrap_creates_a_tenant_with_its_first_admin() -> None:
 
     assert admin.role == "admin" and admin.email == "owner@polis.gr"
     assert await users.get_by_email(admin.tenant_id, "owner@polis.gr") is not None
+
+
+# --- sign-in links are single-use -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_link_works_only_once() -> None:
+    """Regression: the link was a stateless token, so a copy from a proxy log or a
+    forwarded email signed in again until it expired."""
+    service, _, tenant_id = await _with_user()
+    token = service.issue_magic_link_token(tenant_id=tenant_id, email="editor@example.com")
+
+    await service.complete_login(token)
+
+    with pytest.raises(InvalidMagicLink, match="already used"):
+        await service.complete_login(token)
+
+
+@pytest.mark.asyncio
+async def test_checking_a_link_does_not_spend_it() -> None:
+    service, _, tenant_id = await _with_user()
+    token = service.issue_magic_link_token(tenant_id=tenant_id, email="editor@example.com")
+
+    await service.complete_login(token, consume=False)
+    await service.complete_login(token, consume=False)
+    await service.complete_login(token)  # the confirming request spends it
+
+    with pytest.raises(InvalidMagicLink, match="already used"):
+        await service.complete_login(token, consume=False)
+
+
+@pytest.mark.asyncio
+async def test_a_link_issued_after_the_previous_sign_in_works() -> None:
+    service, users, tenant_id = await _with_user()
+    user = await users.get_by_email(tenant_id, "editor@example.com")
+    user.last_login_at = datetime.now(UTC) - timedelta(minutes=5)  # signed in earlier
+    token = service.issue_magic_link_token(tenant_id=tenant_id, email="editor@example.com")
+
+    assert (await service.complete_login(token)).email == "editor@example.com"
+
+
+@pytest.mark.asyncio
+async def test_a_link_issued_before_the_previous_sign_in_is_refused() -> None:
+    service, users, tenant_id = await _with_user()
+    token = service.issue_magic_link_token(tenant_id=tenant_id, email="editor@example.com")
+    user = await users.get_by_email(tenant_id, "editor@example.com")
+    user.last_login_at = datetime.now(UTC) + timedelta(minutes=1)  # signed in since
+
+    with pytest.raises(InvalidMagicLink, match="already used"):
+        await service.complete_login(token)
