@@ -275,6 +275,15 @@ class ReportRepository:
         stmt = select(Report).where(Report.job_id == job_id, Report.kind == kind.value)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def kinds_by_job(self, job_ids: list[UUID]) -> dict[UUID, set[str]]:
+        """Which files each job has, for the dashboard's download links."""
+        found: dict[UUID, set[str]] = {}
+        if job_ids:
+            stmt = select(Report.job_id, Report.kind).where(Report.job_id.in_(job_ids))
+            for job_id, kind in (await self._session.execute(stmt)).all():
+                found.setdefault(job_id, set()).add(kind)
+        return found
+
     async def delete_for_jobs(self, job_ids: list[UUID]) -> None:
         if job_ids:
             await self._session.execute(delete(Report).where(Report.job_id.in_(job_ids)))

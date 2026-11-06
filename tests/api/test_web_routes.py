@@ -7,6 +7,7 @@ tests/api/test_routes_contract.py, so no Postgres/S3/Stripe/SMTP is needed.
 import asyncio
 import io
 import re
+from types import SimpleNamespace
 from uuid import uuid4
 
 import docx
@@ -25,6 +26,7 @@ from editta.api.deps import (
     get_manuscript_repo,
     get_report_repo,
     get_settings,
+    get_templates,
     get_tenant_repo,
 )
 from editta.api.main import app
@@ -275,3 +277,27 @@ def test_sign_in_link_requests_are_rate_limited(client: TestClient) -> None:
     ]
 
     assert statuses == [200] * 10 + [429]
+
+
+def _rendered_job_list(*, state: str, kinds: set[str]) -> str:
+    job = SimpleNamespace(id=uuid4(), manuscript_id=uuid4(), state=state, error=None)
+    template = get_templates().get_template("_job_list.html")
+    return template.render(tenant_id=TENANT_ID, jobs=[job], artifacts={job.id: kinds})
+
+
+def test_a_finished_job_with_comments_offers_the_commented_file() -> None:
+    html = _rendered_job_list(state="completed", kinds={"report", "annotated_manuscript"})
+    assert "/download" in html
+    assert "/artifacts/annotated_manuscript" in html
+
+
+def test_a_finished_job_without_comments_offers_only_the_report() -> None:
+    html = _rendered_job_list(state="completed", kinds={"report"})
+    assert "/download" in html
+    assert "annotated_manuscript" not in html
+
+
+def test_an_unfinished_job_offers_no_download() -> None:
+    html = _rendered_job_list(state="analyzing", kinds=set())
+    assert "/download" not in html
+    assert "annotated_manuscript" not in html

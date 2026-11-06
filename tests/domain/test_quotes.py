@@ -1,7 +1,15 @@
+import random
+
 import pytest
 
 from editta.domain.models import Finding, Severity
-from editta.domain.quotes import anchor_findings, is_quote_anchored
+from editta.domain.quotes import (
+    anchor_findings,
+    is_quote_anchored,
+    locate_quote,
+    normalize_text,
+    normalize_with_map,
+)
 
 SOURCE = "Η γλώσσα του κειμένου παρουσιάζει επαναλήψεις στο δεύτερο κεφάλαιο."
 
@@ -91,3 +99,82 @@ def test_dropped_accents_are_not_forgiven_for_short_quotes() -> None:
     """Accent errors are what Greek typo findings are about; folding them would make a
     misspelling indistinguishable from the correct word."""
     assert not is_quote_anchored("Αθηνα", "Ταξίδι στην Αθήνα.")
+
+
+# --- locate_quote / normalize_with_map: where the quote is, by the same rules ------------
+
+_TRICKY = [
+    "  Στο δεύτερο   κεφάλαιο\nυπάρχει ένα λάθος ",
+    "Straße ß ﬁne «Είναι» – “x”",
+    "Αθήνα é text-\n  ing here",
+    " lead\ttrail \n",
+    "",
+    "   ",
+    "ΐ ΰ ŉ",
+    "a-\nb",
+    "x - \n y",
+]
+
+
+@pytest.mark.parametrize("text", _TRICKY)
+def test_the_map_gives_the_same_text_as_normalize_text(text: str) -> None:
+    mapped = normalize_with_map(text)
+    assert mapped.text == normalize_text(text)
+    assert len(mapped.starts) == len(mapped.ends) == len(mapped.text)
+
+
+def test_the_map_agrees_with_normalize_text_on_random_input() -> None:
+    rnd = random.Random(7)  # noqa: S311 -- test data, not security
+    alphabet = "aβγ ΑΣς\n\t-«»–ßﬁ́ .e"
+    for _ in range(2000):
+        text = "".join(rnd.choice(alphabet) for _ in range(rnd.randint(0, 30)))
+        assert normalize_with_map(text).text == normalize_text(text), repr(text)
+
+
+def _located(quote: str, source: str) -> str | None:
+    span = locate_quote(quote, normalize_with_map(source))
+    return None if span is None else source[span.start : span.end]
+
+
+def test_locate_returns_the_original_characters_not_the_normalized_ones() -> None:
+    source = "Στο  δεύτερο\nκεφάλαιο υπάρχει ένα λάθος εδώ."
+    assert _located("δεύτερο κεφάλαιο", source) == "δεύτερο\nκεφάλαιο"
+
+
+def test_locate_sees_through_a_hyphen_at_a_line_break() -> None:
+    assert _located("text-\ning", "foo text-\ning bar") == "text-\ning"
+
+
+def test_locate_folds_quotes_and_case_like_anchoring_does() -> None:
+    assert _located('"Είναι σαφές"', "«Είναι σαφές» εδώ") == "Είναι σαφές"
+
+
+def test_locate_refuses_a_short_quote_that_occurs_twice() -> None:
+    assert _located("λάθος", "ένα λάθος και άλλο λάθος") is None
+
+
+def test_locate_follows_a_long_near_match_to_one_place() -> None:
+    source = "Αρχή. Ένα μακρύ απόσπασμα που έχει ένα λάθος εδώ. Τέλος."
+    found = _located("Ένα μακρύ απόσπασμα που έχει ένα λαθος εδώ", source)
+    assert found is not None
+    assert "απόσπασμα" in found
+
+
+@pytest.mark.parametrize("quote", ["", "   ", "δεν υπάρχει πουθενά στο κείμενο αυτό το απόσπασμα"])
+def test_locate_gives_none_for_empty_or_absent_quotes(quote: str) -> None:
+    assert _located(quote, "Στο δεύτερο κεφάλαιο υπάρχει ένα λάθος") is None
+
+
+def test_anchored_and_locatable_never_disagree() -> None:
+    source = "Στο δεύτερο κεφάλαιο υπάρχει ένα λάθος. Και ένα ακόμη λάθος εδώ. Ναι, ναι."
+    mapped = normalize_with_map(source)
+    quotes = [
+        "λάθος",
+        "ένα ακόμη λάθος εδώ",
+        "ναι",
+        "Στο δεύτερο κεφάλαιο υπάρχει ένα λαθος",
+        "ψευδές",
+    ]
+    for quote in quotes:
+        located = locate_quote(quote, mapped) is not None
+        assert is_quote_anchored(quote, source) == located, quote

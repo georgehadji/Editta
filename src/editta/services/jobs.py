@@ -36,6 +36,7 @@ from uuid import UUID
 import structlog
 from pydantic import BaseModel
 
+from editta.adapters.export.annotated_docx import AnnotatedManuscriptExporter
 from editta.adapters.export.docx_builder import ReportExporter
 from editta.adapters.parsing import parse_manuscript
 from editta.adapters.persistence.repositories import (
@@ -120,7 +121,10 @@ SYNTHESIS_CHECKPOINT = "synthesis"
 PARSE_TIMEOUT_SECONDS = 120.0
 # Exporters build files from the model's output and, later, re-open the author's own file.
 EXPORT_TIMEOUT_SECONDS = 120.0
-DEFAULT_EXPORTERS: tuple[ArtifactExporter, ...] = (ReportExporter(),)
+DEFAULT_EXPORTERS: tuple[ArtifactExporter, ...] = (
+    ReportExporter(),
+    AnnotatedManuscriptExporter(),
+)
 
 
 def _pass_checkpoint_key(job_id: UUID, pass_name: str) -> str:
@@ -252,7 +256,10 @@ class JobRunner:
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.EXPORTING)
         context = ExportContext(
-            manuscript=manuscript, pass_results=tuple(pass_results), synthesis=synthesis
+            manuscript=manuscript,
+            source=data,
+            pass_results=tuple(pass_results),
+            synthesis=synthesis,
         )
         artifacts = await self._export_artifacts(job.job_id, context)
 
