@@ -1,35 +1,25 @@
-"""S3BlobStore.presigned_get_url against a real S3-compatible server (MinIO).
+"""S3BlobStore.presigned_get_url against a real S3 server, in process (moto).
 
 The unit tests fake the client, so nothing proved that the signed `ResponseContentDisposition`
-survives signing and comes back as the download name. That is what the author's browser
-saves the commented manuscript as. Skips cleanly without a Docker daemon.
+reaches the server and comes back as the download name. That is what the author's browser
+saves the commented manuscript as. No Docker needed: moto serves the S3 API over HTTP.
+It does not check signatures, so this proves the parameter is honoured, not that a given
+store accepts the signature; MinIO no longer publishes a public image to test that against.
 """
 
 import asyncio
-import subprocess
-import time
+import socket
 import urllib.request
 from collections.abc import AsyncIterator, Iterator
 
 import aioboto3
 import pytest
+from moto.server import ThreadedMotoServer
 
 from editta.adapters.storage.s3 import S3BlobStore, attachment_disposition
 
-_USER = "editta"
-_PASSWORD = "editta-test-only"  # noqa: S105 -- throwaway local test server
 _BUCKET = "editta-test"
-
-
-def _docker_available() -> bool:
-    try:
-        subprocess.run(["docker", "info"], capture_output=True, timeout=5, check=True)  # noqa: S607
-    except Exception:
-        return False
-    return True
-
-
-pytestmark = pytest.mark.skipif(not _docker_available(), reason="no Docker daemon is available")
+_KEYS = {"access_key": "test", "secret_key": "test"}  # noqa: S105 -- moto accepts anything
 
 
 def _get(url: str) -> tuple[int, str | None, bytes]:
@@ -38,45 +28,31 @@ def _get(url: str) -> tuple[int, str | None, bytes]:
 
 
 @pytest.fixture(scope="module")
-def minio_endpoint() -> Iterator[str]:
-    from testcontainers.core.container import DockerContainer
-
-    container = (
-        DockerContainer("quay.io/minio/minio:latest")
-        .with_command("server /data")
-        .with_env("MINIO_ROOT_USER", _USER)
-        .with_env("MINIO_ROOT_PASSWORD", _PASSWORD)
-        .with_exposed_ports(9000)
-    )
-    with container:
-        endpoint = f"http://{container.get_container_host_ip()}:{container.get_exposed_port(9000)}"
-        deadline = time.monotonic() + 30
-        while True:
-            try:
-                _get(f"{endpoint}/minio/health/live")
-                break
-            except OSError:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(0.5)
-        yield endpoint
+def s3_endpoint() -> Iterator[str]:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=port, verbose=False)
+    server.start()
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.stop()
 
 
 @pytest.mark.asyncio
 async def test_a_presigned_link_downloads_the_object_under_the_forced_name(
-    minio_endpoint: str,
+    s3_endpoint: str,
 ) -> None:
     async with aioboto3.Session().client(
         "s3",
-        endpoint_url=minio_endpoint,
-        aws_access_key_id=_USER,
-        aws_secret_access_key=_PASSWORD,
-        region_name="auto",
+        endpoint_url=s3_endpoint,
+        aws_access_key_id=_KEYS["access_key"],
+        aws_secret_access_key=_KEYS["secret_key"],
+        region_name="us-east-1",
     ) as client:
         await client.create_bucket(Bucket=_BUCKET)
-    store = S3BlobStore(
-        bucket=_BUCKET, endpoint_url=minio_endpoint, access_key=_USER, secret_key=_PASSWORD
-    )
+    store = S3BlobStore(bucket=_BUCKET, endpoint_url=s3_endpoint, **_KEYS)
 
     async def body() -> AsyncIterator[bytes]:
         yield b"the commented manuscript"

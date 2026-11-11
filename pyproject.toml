@@ -43,6 +43,7 @@ dev = [
   "pytest-cov>=6.0",
   "hypothesis>=6.122",
   "testcontainers[postgres]>=4.9",
+  "moto[server]>=5.0",  # in-process S3 for the presigned-URL test
   "pre-commit>=4.0",
   "bandit>=1.8",
   "pip-audit>=2.7",
