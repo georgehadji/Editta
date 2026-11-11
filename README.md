@@ -121,6 +121,23 @@ migrations 0002-0003; both refuse to start on a role without it):
 
   or as cron: `15 3 * * * cd /srv/editta && .venv/bin/python -m editta.worker.retention`.
 
+- **The queue check** tells you when jobs are stuck. It runs once, prints one line and
+  exits 1 if a job was dead-lettered in the last 24 h or a claimable job has waited over an
+  hour. Schedule it every 5-15 minutes and alert on a non-zero exit.
+
+  ```bash
+  python -m editta.worker.ops_check
+  ```
+
+  Cron: `*/10 * * * * cd /srv/editta && .venv/bin/python -m editta.worker.ops_check`.
+
+## Health endpoints
+
+The API answers `GET /healthz` (the process is up; the container `HEALTHCHECK` uses it) and
+`GET /readyz` (200 if the database answers, 503 if not; point the load balancer at it).
+Both are unauthenticated, exempt from rate limits and return no detail. The image runs as
+a non-root user (uid 10001).
+
 ## Scaling workers
 
 Each worker process runs one job at a time. To process jobs in parallel, run more worker

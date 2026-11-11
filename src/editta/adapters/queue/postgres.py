@@ -18,6 +18,7 @@ Every claim increments `attempt`, so an attempt that ends without recording a fa
 whose claimed attempt exceeds the limit instead of running it forever.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -60,9 +61,39 @@ _DEFER_SQL = text("""
 """)
 
 
+# Counts across every tenant, so it needs the BYPASSRLS worker role (ops_check uses it).
+# "Waiting" is the claim rule above: non-terminal and lease free or expired.
+_HEALTH_SQL = text("""
+    SELECT
+        count(*) FILTER (
+            WHERE state = 'dead' AND updated_at >= now() - make_interval(secs => :window)
+        ) AS dead_recently,
+        extract(epoch FROM now() - min(created_at) FILTER (
+            WHERE state NOT IN ('completed', 'failed', 'dead', 'cancelled')
+              AND (lease_expires_at IS NULL OR lease_expires_at < now())
+        )) AS oldest_waiting_seconds
+    FROM analysis_jobs
+""")
+
+
+@dataclass(frozen=True)
+class QueueHealth:
+    dead_recently: int
+    # None when nothing is waiting.
+    oldest_waiting_seconds: float | None
+
+
 class PostgresJobQueue:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def health(self, *, dead_window_seconds: float) -> QueueHealth:
+        row = (await self._session.execute(_HEALTH_SQL, {"window": dead_window_seconds})).one()
+        waiting = row.oldest_waiting_seconds
+        return QueueHealth(
+            dead_recently=row.dead_recently,
+            oldest_waiting_seconds=None if waiting is None else float(waiting),
+        )
 
     async def claim(
         self, *, worker_id: str, lease_seconds: int = DEFAULT_LEASE_SECONDS

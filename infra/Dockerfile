@@ -10,7 +10,14 @@ COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
 
+# Never run as root: a bug in manuscript parsing should not own the container.
+RUN useradd --system --create-home --uid 10001 editta
+USER editta
+
 FROM base AS api
+# Liveness only (the process answers); /readyz is for the load balancer. stdlib, no curl in slim.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
 CMD ["uvicorn", "editta.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 FROM base AS worker
