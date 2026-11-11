@@ -126,6 +126,16 @@ migrations 0002-0003; both refuse to start on a role without it):
 Each worker process runs one job at a time. To process jobs in parallel, run more worker
 processes; they claim jobs with `FOR UPDATE SKIP LOCKED`, so they never take the same job.
 
+Each worker keeps its own LLM rate bucket, so N workers together send N times one worker's
+rate. Split the organisation's limit between them:
+`EDITTA_LLM_REQUESTS_PER_MINUTE` = organisation limit ÷ number of workers (default 50).
+Lower it on every worker when you add one.
+
+A job attempt that spends longer than `EDITTA_ANALYSIS_TIMEOUT_SECONDS` (default 1800) on the
+analysis passes, or `EDITTA_SYNTHESIS_TIMEOUT_SECONDS` (default 900) on the synthesis, is
+stopped and retried from its saved passes, so a stuck provider cannot hold a job for hours.
+Set them from the slowest honest run of `python -m evals.run`.
+
 ## Live-API smoke evals
 
 Before the first paid report and after every prompt change: `python -m evals.run` (see

@@ -54,6 +54,11 @@ class LLMOutputTruncated(LLMError):
     retryable: ClassVar[bool] = False
 
 
+class LLMTimeout(LLMError):
+    """A model call, or the whole analysis phase, ran past its time limit. Retryable:
+    the next attempt resumes from the checkpoints, so finished passes are not paid again."""
+
+
 class LeaseLost(EdittaError):
     """This worker no longer owns the job (its lease expired and another worker claimed
     it). Not a job failure: the runner stops writing and records nothing."""

@@ -1,6 +1,8 @@
+import asyncio
 import io
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 from uuid import uuid4
 
 import docx
@@ -8,7 +10,14 @@ import pytest
 
 from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, ParseError
-from editta.domain.models import CachePolicy, ClaimedJob, JobOutcomeKind, LLMUsage, PromptParts
+from editta.domain.models import (
+    CachePolicy,
+    ClaimedJob,
+    JobOutcomeKind,
+    LLMUsage,
+    PromptParts,
+    SynthesisPlan,
+)
 from editta.domain.states import JobState, retry_delay_seconds
 from editta.services.jobs import DEFAULT_EXPORTERS, JobRunner, _pass_checkpoint_key
 from tests.fakes import FailureRule, FakeLLMClient
@@ -35,6 +44,7 @@ class Harness:
         cost_ceiling_usd: float = 6.0,
         reserved: int | None = 1,
         exporters: tuple[object, ...] = DEFAULT_EXPORTERS,
+        **runner_options: float,
     ) -> None:
         self.tenant_id, self.job_id, self.manuscript_id = uuid4(), uuid4(), uuid4()
         self.uow = FakeJobUnitOfWork()
@@ -46,6 +56,7 @@ class Harness:
             llm=self.llm,
             cost_ceiling_usd=cost_ceiling_usd,
             exporters=exporters,  # type: ignore[arg-type]
+            **runner_options,
         )
         self.uow.manuscripts.seed(
             self.tenant_id, self.manuscript_id, blob_key="raw/essay", title="essay.docx"
@@ -271,6 +282,43 @@ async def test_retryable_failure_keeps_sibling_checkpoints_and_backs_off() -> No
     assert await h.checkpointed() == {"language", "metadata", "integrity"}
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []  # not refunded: the job is still going to run
+
+
+class _HangingLLM(FakeLLMClient):
+    """Answers like the fake, except the calls `hangs` selects, which never return."""
+
+    def __init__(self, hangs: Callable[[PromptParts, Any], bool]) -> None:
+        super().__init__(manuscript_text=MANUSCRIPT_TEXT)
+        self._hangs = hangs
+
+    async def analyze(self, parts: PromptParts, schema: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        if self._hangs(parts, schema):
+            await asyncio.sleep(60)
+        return await super().analyze(parts, schema, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_never_answers_ends_the_attempt_and_keeps_the_other_passes() -> None:
+    llm = _HangingLLM(lambda parts, schema: parts.instructions.startswith(STRUCTURE_MARKER_PREFIX))
+    h = Harness(llm=llm, analysis_timeout_seconds=0.2)
+
+    outcome = await h.runner.run(h.claimed(attempt=1))
+
+    assert outcome.kind is JobOutcomeKind.RETRY
+    assert h.job.state is JobState.PENDING  # type: ignore[attr-defined]
+    assert await h.checkpointed() == {"language", "metadata", "integrity"}
+    assert h.ledger("refund") == []  # still going to run again
+
+
+@pytest.mark.asyncio
+async def test_a_synthesis_that_never_answers_ends_the_attempt_and_keeps_every_pass() -> None:
+    llm = _HangingLLM(lambda parts, schema: schema is SynthesisPlan)
+    h = Harness(llm=llm, synthesis_timeout_seconds=0.2)
+
+    outcome = await h.runner.run(h.claimed(attempt=1))
+
+    assert outcome.kind is JobOutcomeKind.RETRY
+    assert await h.checkpointed() == {"language", "structure", "metadata", "integrity"}
 
 
 @pytest.mark.asyncio

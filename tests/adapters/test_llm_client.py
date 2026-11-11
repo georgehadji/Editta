@@ -11,7 +11,12 @@ from editta.adapters.llm.client import (
     _output_config,
     build_user_content,
 )
-from editta.domain.errors import LLMOutputInvalid, LLMOutputTruncated, LLMRequestRejected
+from editta.domain.errors import (
+    LLMOutputInvalid,
+    LLMOutputTruncated,
+    LLMRequestRejected,
+    LLMTimeout,
+)
 from editta.domain.models import CachePolicy, Finding, PassFindings, PromptParts, Severity
 
 PARTS = PromptParts(system="sys", manuscript_block="manuscript body", instructions="do X")
@@ -116,6 +121,27 @@ async def test_cut_off_answer_is_not_retryable_and_leaks_nothing() -> None:
     assert error.__cause__ is None and error.__suppress_context__
     assert error.usage is not None and error.usage.output_tokens == 64_000
     assert client._breaker._consecutive_failures == 0  # the provider is healthy
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_times_out_is_retryable_and_counts_against_the_provider() -> None:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    class _TimesOut:
+        async def __aenter__(self) -> None:
+            raise anthropic.APITimeoutError(request=request)
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    client = AnthropicLLMClient("key")
+    client._client.messages.stream = lambda **kwargs: _TimesOut()  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(LLMTimeout) as caught:
+        await _analyze(client)
+
+    assert caught.value.retryable
+    assert client._breaker._consecutive_failures == 1
 
 
 @pytest.mark.asyncio

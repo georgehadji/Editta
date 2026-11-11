@@ -30,6 +30,7 @@ from editta.adapters.llm.client import (
     build_user_content,
     output_error,
 )
+from editta.adapters.llm.limits import REQUEST_TIMEOUT_SECONDS
 from editta.adapters.llm.resilience import CircuitBreaker, TokenBucket
 from editta.domain.budget import (
     GEMINI_ARGON,
@@ -40,7 +41,7 @@ from editta.domain.budget import (
     OPUS,
     SONNET,
 )
-from editta.domain.errors import LLMError, LLMRequestRejected
+from editta.domain.errors import LLMError, LLMRequestRejected, LLMTimeout
 from editta.domain.models import CachePolicy, LLMResult, LLMUsage, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
@@ -58,8 +59,6 @@ OPENROUTER_MODELS: Final = {
 # 402 = out of OpenRouter credits: retrying cannot help either.
 _NON_RETRYABLE_STATUSES: Final = frozenset({400, 401, 402, 403, 404, 413, 422})
 MAX_ATTEMPTS: Final = 3
-# A book-length prompt with high-effort thinking can take minutes to answer.
-REQUEST_TIMEOUT_SECONDS: Final = 600.0
 
 
 def _openrouter_model(model: str) -> str:
@@ -231,6 +230,8 @@ class OpenRouterLLMClient:
                         error = LLMError(f"OpenRouter call failed ({response.status_code})")
                         with contextlib.suppress(ValueError):  # HTTP-date: keep the backoff
                             delay = float(response.headers.get("retry-after") or delay)
+            except httpx.TimeoutException:
+                error = LLMTimeout("OpenRouter call timed out")
             except httpx.HTTPError as exc:
                 error = LLMError(f"OpenRouter call failed: {exc}")
             except json.JSONDecodeError:

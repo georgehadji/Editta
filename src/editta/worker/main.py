@@ -82,8 +82,11 @@ class Worker:
             anthropic_api_key=settings.anthropic_api_key,
             openrouter_api_key=settings.openrouter_api_key,
             max_concurrency=settings.max_llm_concurrency,
+            rate_limit_per_minute=settings.llm_requests_per_minute,
         )
         self._cost_ceiling_usd = settings.job_cost_ceiling_usd
+        self._analysis_timeout = settings.analysis_timeout_seconds
+        self._synthesis_timeout = settings.synthesis_timeout_seconds
         self._shutdown = asyncio.Event()
 
     def request_shutdown(self) -> None:
@@ -119,6 +122,8 @@ class Worker:
             blobs=self._blobs,
             llm=self._llm,
             cost_ceiling_usd=self._cost_ceiling_usd,
+            analysis_timeout_seconds=self._analysis_timeout,
+            synthesis_timeout_seconds=self._synthesis_timeout,
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(claimed.job_id))
         try:
