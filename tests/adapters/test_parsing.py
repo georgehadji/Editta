@@ -3,6 +3,8 @@ import zipfile
 
 import docx
 import pytest
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 from editta.adapters.parsing import EXTRACTORS, parse_manuscript
 from editta.adapters.parsing import pdf as pdf_module
@@ -88,6 +90,56 @@ def test_parse_docx_extracts_text_and_sections() -> None:
 def test_parse_docx_rejects_empty_document() -> None:
     with pytest.raises(ParseError, match="no extractable text"):
         parse_manuscript(_build_docx_bytes([]), "essay.docx")
+
+
+_W = nsdecls("w")
+
+
+def _docx_with_paragraph(*children: str, table_text: str | None = None) -> bytes:
+    document = docx.Document()
+    paragraph = document.add_paragraph()
+    for xml in children:
+        paragraph._p.append(parse_xml(xml))
+    if table_text:
+        document.add_table(rows=1, cols=1).cell(0, 0).text = table_text
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def test_parse_docx_reads_text_word_keeps_outside_plain_runs() -> None:
+    data = _docx_with_paragraph(
+        f"<w:r {_W}><w:t>Plain.</w:t></w:r>",
+        f'<w:ins {_W} w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        "<w:r><w:t> Inserted.</w:t></w:r></w:ins>",
+        f'<w:del {_W} w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        "<w:r><w:delText> Deleted.</w:delText></w:r></w:del>",
+        f"<w:sdt {_W}><w:sdtContent><w:r><w:t> Control.</w:t></w:r></w:sdtContent></w:sdt>",
+        f'<w:fldSimple {_W} w:instr="PAGE"><w:r><w:t> 7</w:t></w:r></w:fldSimple>',
+        table_text="Cell text",
+    )
+
+    assert parse_manuscript(data, "essay.docx").text == "Plain. Inserted. Control. 7\nCell text"
+
+
+def test_parse_docx_reads_a_document_written_entirely_under_track_changes() -> None:
+    data = _docx_with_paragraph(
+        f'<w:ins {_W} w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        "<w:r><w:t>Only tracked.</w:t></w:r></w:ins>"
+    )
+
+    assert parse_manuscript(data, "essay.docx").text == "Only tracked."
+
+
+def test_parse_docx_does_not_read_a_text_box_twice() -> None:
+    boxed = (
+        f'<w:r {_W} xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape><v:textbox>'
+        "<w:txbxContent><w:p><w:r><w:t>Boxed</w:t></w:r></w:p></w:txbxContent>"
+        "</v:textbox></v:shape></w:pict></w:r>"
+    )
+    data = _docx_with_paragraph(f"<w:r {_W}><w:t>Anchor</w:t></w:r>", boxed)
+
+    assert parse_manuscript(data, "essay.docx").text == "Anchor"
 
 
 # --- format dispatch, PDF, filename sanitizing --------------------------------------

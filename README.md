@@ -70,6 +70,44 @@ Credits are granted only once the payment is settled. A checkout paid by a delay
   must not record query strings for that path: log `$uri` instead of `$request`, or
   `access_log off;` on that location.
 
+## Running the worker and the retention sweep
+
+The web app only queues work. Two more processes must run, from the same environment as
+the app (same `.env`, plus `EDITTA_WORKER_DATABASE_URL`: the `BYPASSRLS` role from
+migrations 0002-0003; both refuse to start on a role without it):
+
+- **The worker** runs analyses. Keep it running as a service; on SIGTERM it finishes the
+  job in hand before exiting.
+
+  ```bash
+  python -m editta.worker.main
+  ```
+
+  Without it, uploads stay queued forever.
+
+- **The retention sweep** deletes manuscript content past its retention date (GDPR). It
+  runs once and exits, so schedule it daily. It prints `retention sweep: N purged, M failed`
+  and exits 1 if any manuscript failed, so let the scheduler alert on a non-zero exit; the
+  next run retries what failed.
+
+  ```bash
+  python -m editta.worker.retention
+  ```
+
+  As a systemd timer: an `editta-retention.service` (`Type=oneshot`, the command above) and
+
+  ```ini
+  # editta-retention.timer
+  [Timer]
+  OnCalendar=daily
+  Persistent=true
+
+  [Install]
+  WantedBy=timers.target
+  ```
+
+  or as cron: `15 3 * * * cd /srv/editta && .venv/bin/python -m editta.worker.retention`.
+
 ## Scaling workers
 
 Each worker process runs one job at a time. To process jobs in parallel, run more worker
