@@ -6,6 +6,9 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr
 
+from editta.domain.artifacts import ArtifactKind
+from editta.domain.job_view import JobPhase, NextAction
+
 
 class Envelope[T](BaseModel):
     success: bool
@@ -56,9 +59,18 @@ class ManuscriptUploadResponse(BaseModel):
 
 
 class JobStatusResponse(BaseModel):
+    """`state` and `error` are the raw row, kept as they were. The other fields are the same
+    view the dashboard renders (domain/job_view.py): poll until `terminal`, then act on
+    `next_action`; `artifacts` lists the kinds ready to download."""
+
     job_id: UUID
     state: str
     error: str | None = None
+    phase: JobPhase
+    terminal: bool
+    refunded: bool
+    next_action: NextAction
+    artifacts: list[ArtifactKind]
 
 
 class ReportDownloadResponse(BaseModel):

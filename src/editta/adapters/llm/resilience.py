@@ -3,11 +3,22 @@
 import asyncio
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
+
+import structlog
 
 from editta.domain.errors import LLMError
 
+logger = structlog.get_logger(__name__)
+
 FAILURE_THRESHOLD = 5
 COOLDOWN_SECONDS = 60.0
+
+
+class BreakerState(StrEnum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
 
 
 @dataclass
@@ -18,6 +29,16 @@ class CircuitBreaker:
     cooldown_seconds: float = COOLDOWN_SECONDS
     _consecutive_failures: int = field(default=0, init=False)
     _opened_at: float | None = field(default=None, init=False)
+    # Logging only: True while the admitted probe is in flight (before_call re-stamps _opened_at).
+    _probing: bool = field(default=False, init=False)
+
+    @property
+    def state(self) -> BreakerState:
+        if self._opened_at is None:
+            return BreakerState.CLOSED
+        if time.monotonic() - self._opened_at < self.cooldown_seconds:
+            return BreakerState.OPEN
+        return BreakerState.HALF_OPEN
 
     def before_call(self) -> None:
         if self._opened_at is None:
@@ -26,14 +47,25 @@ class CircuitBreaker:
             raise LLMError("circuit breaker open: LLM provider failing repeatedly")
         # Half-open: this call is the probe; everyone else waits another cooldown for its result.
         self._opened_at = time.monotonic()
+        self._probing = True
+        logger.info("llm.breaker_probe")
 
     def record_success(self) -> None:
+        if self._opened_at is not None:
+            logger.info("llm.breaker_closed")
         self._consecutive_failures = 0
         self._opened_at = None
+        self._probing = False
 
     def record_failure(self) -> None:
+        was_probe = self._probing
+        self._probing = False
         self._consecutive_failures += 1
         if self._consecutive_failures >= self.failure_threshold:
+            if self._opened_at is None or was_probe:
+                logger.warning(
+                    "llm.breaker_opened", consecutive_failures=self._consecutive_failures
+                )
             self._opened_at = time.monotonic()
 
 

@@ -135,7 +135,17 @@ def test_magic_link_login_then_upload_then_status_round_trips(
 
     status_response = client.get(f"/manuscripts/jobs/{job_id}")
     assert status_response.status_code == 200
-    assert status_response.json()["data"]["job_id"] == job_id
+    # The raw fields keep their shape; the view fields tell a client when to stop polling.
+    assert status_response.json()["data"] == {
+        "job_id": job_id,
+        "state": "pending",
+        "error": None,
+        "phase": "queued",
+        "terminal": False,
+        "refunded": False,
+        "next_action": "wait",
+        "artifacts": [],
+    }
 
 
 def test_upload_without_csrf_token_is_rejected(client: TestClient, harness: Harness) -> None:

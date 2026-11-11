@@ -30,8 +30,8 @@ from editta.api.deps import (
     get_tenant_repo,
 )
 from editta.api.main import app
-from editta.api.routes.web import _any_job_running
 from editta.config import Settings
+from editta.domain.job_view import job_view
 from editta.services.billing import BillingService
 from tests.services.fakes import (
     FakeAnalysisJobRepo,
@@ -159,7 +159,7 @@ def test_full_login_upload_flow_unassisted(client: TestClient) -> None:
     )
     assert upload.status_code == 200
     assert "essay.docx" in upload.text  # the job list names the file, not its id
-    assert "pending" in upload.text
+    assert "Queued" in upload.text
 
 
 def test_opening_the_link_alone_does_not_sign_in(client: TestClient) -> None:
@@ -280,13 +280,15 @@ def test_sign_in_link_requests_are_rate_limited(client: TestClient) -> None:
     assert statuses == [200] * 10 + [429]
 
 
-def _rendered_job_list(*, state: str, kinds: set[str]) -> str:
-    job = SimpleNamespace(id=uuid4(), manuscript_id=uuid4(), state=state, error=None)
+def _rendered_job_list(
+    *, state: str, kinds: set[str], error: str | None = None, failure_kind: str | None = None
+) -> str:
+    job = SimpleNamespace(id=uuid4(), manuscript_id=uuid4())
     template = get_templates().get_template("_job_list.html")
     return template.render(
         tenant_id=TENANT_ID,
         jobs=[job],
-        artifacts={job.id: kinds},
+        views={job.id: job_view(state, error, failure_kind, kinds)},
         titles={job.manuscript_id: "Ο λαβύρινθος.docx"},
     )
 
@@ -309,26 +311,53 @@ def test_a_finished_job_without_comments_offers_only_the_report() -> None:
 
 def test_an_unfinished_job_offers_no_download() -> None:
     html = _rendered_job_list(state="analyzing", kinds=set())
+    assert "Running: analyzing" in html
     assert "/artifacts/report" not in html
     assert "annotated_manuscript" not in html
 
 
+def test_a_job_waiting_to_retry_says_so_instead_of_looking_failed() -> None:
+    html = _rendered_job_list(state="pending", kinds=set(), error="the model timed out")
+    assert "Retrying" in html
+    assert 'class="note-text">the model timed out' in html
+    assert "error-text" not in html
+
+
+def test_a_failed_upload_says_the_credit_came_back_and_what_to_do() -> None:
+    html = _rendered_job_list(
+        state="dead", kinds=set(), error="not a readable .docx", failure_kind="customer"
+    )
+    assert "Failed — credit refunded" in html
+    assert 'class="error-text">not a readable .docx' in html
+    assert "Fix the file and upload it again." in html
+    assert "/artifacts/report" not in html
+
+
+def test_a_failure_on_our_side_says_so() -> None:
+    html = _rendered_job_list(state="dead", kinds=set(), error="gave up after 3 attempts")
+    assert "Failed — credit refunded" in html
+    assert "on our side" in html
+
+
+def test_a_report_deleted_by_retention_offers_no_dead_link() -> None:
+    html = _rendered_job_list(state="completed", kinds=set())
+    assert "Expired" in html
+    assert "/artifacts/report" not in html
+
+
+def test_an_unknown_state_renders_instead_of_crashing() -> None:
+    assert "Unknown" in _rendered_job_list(state="awaiting_batch", kinds=set())
+
+
+def test_an_empty_list_says_nothing_was_uploaded() -> None:
+    template = get_templates().get_template("_job_list.html")
+    html = template.render(tenant_id=TENANT_ID, jobs=[], views={}, titles={}, polling=False)
+    assert "No manuscripts uploaded yet." in html
+
+
 def test_the_job_table_asks_for_itself_only_while_a_job_is_running() -> None:
     template = get_templates().get_template("_job_list.html")
-    context = {"tenant_id": TENANT_ID, "jobs": [], "artifacts": {}, "titles": {}}
+    context = {"tenant_id": TENANT_ID, "jobs": [], "views": {}, "titles": {}}
 
     assert "hx-trigger" in template.render(**context, polling=True)
     assert "hx-trigger" not in template.render(**context, polling=False)
-
-
-@pytest.mark.parametrize(
-    ("states", "running"),
-    [
-        (["completed", "dead"], False),
-        ([], False),
-        (["completed", "analyzing"], True),
-        (["pending"], True),  # between a failed attempt and its retry
-    ],
-)
-def test_a_job_is_running_until_it_reaches_a_final_state(states: list[str], running: bool) -> None:
-    assert _any_job_running(states) is running
