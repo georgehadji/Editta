@@ -25,6 +25,9 @@ jobs:
       - name: Mypy (strict)
         run: mypy src
 
+      - name: Import contracts (architecture)
+        run: lint-imports
+
       - name: Pytest + coverage
         run: pytest
 

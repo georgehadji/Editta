@@ -231,6 +231,14 @@ container runs as a non-root user, and a dead job makes the scheduled ops check 
 blob store path and temp usage in the image. S3 is the production store, so this should only affect
 dev images.
 
+**Implemented as (PR 3), where it differs from the text above.** The two queries are one method,
+`PostgresJobQueue.health()`, not `AnalysisJobRepository` methods: they are queue questions and the
+queue already runs on the worker role. "Dead" counts jobs whose `updated_at` is inside 24 h, and
+"waiting" follows the claim rule (non-terminal and lease free or expired), not a `queued` state,
+which does not exist. The stuck threshold is 1 h so one busy worker with a 30 min job does not alert.
+The `ops_check` exit code is tested through its pure `problems()` function and a stubbed `main()`; the
+Postgres query has an integration test. The image build is **not** verified locally (no Docker here).
+
 ---
 
 ## Item 5: Architecture contracts in CI (A-2)
@@ -256,6 +264,11 @@ retention,pipeline}` → adapters (`jobs.py:39-48`, `uploads.py:26-33`, `account
 `reports.py:11`, `retention.py:27`, `pipeline.py:8`) and `api/routes/{web,billing,manuscripts}` →
 adapters. Each item-6 PR deletes the lines it fixes; the contract fails if one is removed wrongly or
 re-added. When the lists are empty the ignore blocks are deleted.
+
+**Implemented as (PR 4).** Six contracts as above, one CI step (`lint-imports`, between mypy and
+pytest), and `docs/adr/0001-dependency-rule.md`. The ignore lists hold 10 service edges, 5 route edges
+and 2 sibling edges (`annotated_docx` → `parsing.docx` and `parsing.safety`). A probe import added to
+`domain/ports.py` turned the domain contract BROKEN, then was reverted.
 
 **Changes.** `pyproject.toml` (config + `import-linter` in the `dev` extra), `ci.yml` (one step
 `lint-imports` after mypy), optional `pre-commit` hook.

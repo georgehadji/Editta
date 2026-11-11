@@ -47,6 +47,7 @@ dev = [
   "pre-commit>=4.0",
   "bandit>=1.8",
   "pip-audit>=2.7",
+  "import-linter>=2.0",
 ]
 
 [project.scripts]
@@ -103,3 +104,95 @@ omit = [
 
 [tool.bandit]
 exclude_dirs = ["tests"]
+
+# The dependency rule of docs/PLAN.md §2 (see docs/adr/0001-dependency-rule.md), checked in CI by
+# `lint-imports`. Composition roots (api/deps.py, api/main.py, worker/main.py,
+# worker/retention.py, cli.py) are the one place allowed to name concrete adapters.
+[tool.importlinter]
+root_package = "editta"
+
+[[tool.importlinter.contracts]]
+name = "The domain imports nothing above it"
+type = "forbidden"
+source_modules = ["editta.domain"]
+forbidden_modules = [
+    "editta.passes",
+    "editta.services",
+    "editta.adapters",
+    "editta.api",
+    "editta.worker",
+    "editta.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "Passes depend on the domain only"
+type = "forbidden"
+source_modules = ["editta.passes"]
+forbidden_modules = [
+    "editta.services",
+    "editta.adapters",
+    "editta.api",
+    "editta.worker",
+    "editta.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "Adapters do not import the layers above them"
+type = "forbidden"
+source_modules = ["editta.adapters"]
+forbidden_modules = ["editta.services", "editta.api", "editta.worker", "editta.cli"]
+
+[[tool.importlinter.contracts]]
+name = "Adapters do not import each other"
+type = "independence"
+modules = [
+    "editta.adapters.email",
+    "editta.adapters.export",
+    "editta.adapters.llm",
+    "editta.adapters.parsing",
+    "editta.adapters.persistence",
+    "editta.adapters.queue",
+    "editta.adapters.storage",
+]
+# The one documented sibling edge: the annotated-manuscript exporter re-walks the file with
+# the parser's own text helpers, so both sides compute the same offsets.
+ignore_imports = [
+    "editta.adapters.export.annotated_docx -> editta.adapters.parsing.docx",
+    "editta.adapters.export.annotated_docx -> editta.adapters.parsing.safety",
+]
+
+# Known violations, one line each, found by the architecture audit of 2026-11-11. They are
+# fixed by docs/ARCH_REMEDIATION_PLAN.md item 6, and each fix deletes its line: an entry that
+# no longer matches an import fails the build, so this list can only shrink.
+[[tool.importlinter.contracts]]
+name = "Services do not import adapters, the API or the worker"
+type = "forbidden"
+source_modules = ["editta.services"]
+forbidden_modules = ["editta.adapters", "editta.api", "editta.worker", "editta.cli"]
+allow_indirect_imports = true
+ignore_imports = [
+    "editta.services.accounts -> editta.adapters.persistence.repositories",
+    "editta.services.jobs -> editta.adapters.export.annotated_docx",
+    "editta.services.jobs -> editta.adapters.export.docx_builder",
+    "editta.services.jobs -> editta.adapters.parsing",
+    "editta.services.jobs -> editta.adapters.persistence.repositories",
+    "editta.services.pipeline -> editta.adapters.parsing",
+    "editta.services.reports -> editta.adapters.persistence.repositories",
+    "editta.services.retention -> editta.adapters.persistence.repositories",
+    "editta.services.uploads -> editta.adapters.parsing",
+    "editta.services.uploads -> editta.adapters.persistence.repositories",
+]
+
+[[tool.importlinter.contracts]]
+name = "Routes do not import adapters"
+type = "forbidden"
+source_modules = ["editta.api.routes"]
+forbidden_modules = ["editta.adapters"]
+allow_indirect_imports = true
+ignore_imports = [
+    "editta.api.routes.billing -> editta.adapters.persistence.repositories",
+    "editta.api.routes.billing -> editta.adapters.persistence.uow",
+    "editta.api.routes.manuscripts -> editta.adapters.persistence.repositories",
+    "editta.api.routes.web -> editta.adapters.email.console",
+    "editta.api.routes.web -> editta.adapters.persistence.repositories",
+]
