@@ -361,6 +361,48 @@ async def test_dead_job_is_never_claimed_again(
 
 
 @pytest.mark.asyncio
+async def test_queue_health_counts_dead_jobs_and_the_oldest_claimable_wait(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with pg_worker_factory() as session:
+        empty = await PostgresJobQueue(session).health(dead_window_seconds=3600)
+    assert (empty.dead_recently, empty.oldest_waiting_seconds) == (0, None)
+
+    tenant_id, _, waiting_id = await _seed_job(pg_worker_factory)
+    _, _, dead_id = await _seed_job(pg_worker_factory)
+    async with pg_worker_factory() as session:
+        await session.execute(
+            text("UPDATE analysis_jobs SET created_at = now() - interval '2 hours' WHERE id = :i"),
+            {"i": waiting_id},
+        )
+        await session.execute(
+            text("UPDATE analysis_jobs SET state = 'dead' WHERE id = :i"), {"i": dead_id}
+        )
+        await session.commit()
+
+    async with pg_worker_factory() as session:
+        queue = PostgresJobQueue(session)
+        health = await queue.health(dead_window_seconds=3600)
+        assert health.dead_recently == 1
+        assert health.oldest_waiting_seconds is not None
+        assert 7000 < health.oldest_waiting_seconds < 7400  # the dead job is not "waiting"
+
+        # Claimed (lease held) -> nobody is waiting any more.
+        assert await queue.claim(worker_id="w") is not None
+        held = await queue.health(dead_window_seconds=3600)
+        assert held.oldest_waiting_seconds is None
+
+        # A dead job older than the window no longer counts.
+        await session.execute(
+            text("UPDATE analysis_jobs SET updated_at = now() - interval '2 hours' WHERE id = :i"),
+            {"i": dead_id},
+        )
+        await session.commit()
+        assert (await queue.health(dead_window_seconds=3600)).dead_recently == 0
+
+
+@pytest.mark.asyncio
 async def test_a_worker_that_lost_its_lease_cannot_write_release_or_defer(
     pg_session_factory: async_sessionmaker[AsyncSession],
     pg_worker_factory: async_sessionmaker[AsyncSession],

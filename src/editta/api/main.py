@@ -16,7 +16,7 @@ from editta.api.middleware import (
     SecurityHeadersMiddleware,
     limiter,
 )
-from editta.api.routes import auth, billing, manuscripts, web
+from editta.api.routes import auth, billing, health, manuscripts, web
 from editta.observability import configure_logging
 
 logger = structlog.get_logger(__name__)
@@ -54,6 +54,7 @@ app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BYTES)
 # Outermost of all, so even a 413 answer carries the request id.
 app.add_middleware(RequestContextMiddleware)
 
+app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(manuscripts.router)
 app.include_router(billing.router)
