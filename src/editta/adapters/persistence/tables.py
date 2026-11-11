@@ -52,7 +52,6 @@ class Manuscript(UUIDPKMixin, TimestampMixin, Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     title: Mapped[str]
     blob_key: Mapped[str]
-    sha256: Mapped[str]
     status: Mapped[str] = mapped_column(default="uploaded")
     retention_until: Mapped[datetime]
 

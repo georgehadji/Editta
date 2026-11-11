@@ -1,4 +1,4 @@
-"""JobQueue port + Postgres SKIP LOCKED implementation.
+"""Postgres SKIP LOCKED job queue.
 
 Claim doesn't touch job `state` — that stays the job runner's decision (it inspects
 checkpointed PassResults to resume at the right pipeline stage). Claim only grants

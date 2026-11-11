@@ -207,7 +207,6 @@ async def test_rls_blocks_cross_tenant_manuscript_reads(
             tenant_id=tenant_a,
             title="secret.docx",
             blob_key="k",
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
 
@@ -244,7 +243,6 @@ async def test_skip_locked_claim_never_double_claims_under_concurrency(
             tenant_id=tenant_id,
             title="m.docx",
             blob_key="k",
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
         job = await AnalysisJobRepository(session).create(
@@ -272,7 +270,6 @@ async def _seed_job(
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
         job = await AnalysisJobRepository(session).create(
@@ -347,7 +344,6 @@ async def test_one_tenants_batch_does_not_hold_back_another_tenant(
                 tenant_id=tenant_id,
                 title="m.docx",
                 blob_key="k",
-                sha256="h",
                 retention_until=datetime.now(UTC),
             )
             job = await AnalysisJobRepository(session).create(

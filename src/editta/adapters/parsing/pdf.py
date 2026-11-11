@@ -1,12 +1,11 @@
-"""PDF -> normalized text + section map (defensive, text-layer PDFs only).
+"""PDF -> normalized text (defensive, text-layer PDFs only).
 
 Untrusted input: guard clauses first, then extraction. pypdf caps each stream's
 decompressed size itself (75 MB per stream, pypdf >= 6); the limits here bound the
 *total* — page count and extracted characters — which pypdf does not.
 
 Scanned (image-only) PDFs have no text layer and are rejected with a clear error;
-OCR is out of scope. Sections come from the PDF outline (bookmarks) when present —
-PDFs carry no reliable heading styles to recover them from otherwise.
+OCR is out of scope.
 """
 
 import io
@@ -67,23 +66,4 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
     if not full_text.strip():
         raise ParseError("PDF contains no extractable text (scanned PDFs are not supported)")
 
-    return ManuscriptText(
-        source_filename=filename, text=full_text, sections=_outline_titles(reader)
-    )
-
-
-def _outline_titles(reader: PdfReader) -> tuple[str, ...]:
-    """Top-level bookmark titles. Best-effort: a malformed outline yields no sections
-    rather than failing a document whose text extracted fine."""
-    try:
-        outline = reader.outline
-    except Exception:
-        return ()
-    titles: list[str] = []
-    for item in outline:
-        if isinstance(item, list):  # nested children of the previous entry
-            continue
-        title = getattr(item, "title", None)
-        if isinstance(title, str) and title.strip():
-            titles.append(title.strip())
-    return tuple(titles)
+    return ManuscriptText(source_filename=filename, text=full_text)

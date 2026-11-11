@@ -285,6 +285,6 @@ def test_smtp_failure_does_not_reveal_that_the_account_exists(harness: Harness) 
         == (unknown.status_code, unknown.json())
         == (
             202,
-            {"success": True, "data": {"accepted": True}, "error": None, "meta": None},
+            {"success": True, "data": {"accepted": True}, "error": None},
         )
     )

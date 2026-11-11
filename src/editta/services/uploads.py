@@ -17,7 +17,6 @@ second still pointed at — and it put client-supplied names into object-store p
 The sanitized original filename is kept only as DB metadata.
 """
 
-import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -79,7 +78,6 @@ async def submit_manuscript(
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256=hashlib.sha256(data).hexdigest(),
             retention_until=(now or datetime.now(UTC)) + timedelta(days=retention_days),
         )
         job = await jobs.create(tenant_id=tenant_id, manuscript_id=manuscript.id)
@@ -98,4 +96,6 @@ async def submit_manuscript(
         # never delete it. Keep nothing of the manuscript.
         await blobs.delete_prefix(blob_key)
         raise
+    # shortcut: the caller commits after this returns; if that commit fails, the blob has
+    # no row and the retention sweep never deletes it. Add an orphan sweep if this occurs.
     return SubmittedManuscript(manuscript_id=manuscript.id, job_id=job.id)

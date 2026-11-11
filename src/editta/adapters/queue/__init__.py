@@ -1,1 +1,1 @@
-"""JobQueue port + Postgres SKIP LOCKED implementation. (Phase 2)"""
+"""Postgres SKIP LOCKED job queue."""

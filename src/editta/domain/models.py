@@ -75,7 +75,6 @@ class ManuscriptText(Frozen):
 
     source_filename: str
     text: str
-    sections: tuple[str, ...] = ()
 
 
 class PromptParts(Frozen):
@@ -98,7 +97,7 @@ class LLMResult[T: BaseModel](Frozen):
 
 
 class ClaimedJob(Frozen):
-    """A job handed to one worker by JobQueue.claim(), lease-owned until it heartbeats.
+    """A job handed to one worker by PostgresJobQueue.claim(), lease-owned until it heartbeats.
 
     `attempt` is this run's 1-based attempt number: the claim itself increments it, so
     a worker that crashes mid-job still consumes an attempt and a crash-looping job

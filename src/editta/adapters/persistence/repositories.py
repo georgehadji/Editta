@@ -105,14 +105,13 @@ class ManuscriptRepository:
         self._session = session
 
     async def create(
-        self, *, tenant_id: UUID, title: str, blob_key: str, sha256: str, retention_until: datetime
+        self, *, tenant_id: UUID, title: str, blob_key: str, retention_until: datetime
     ) -> Manuscript:
         manuscript = Manuscript(
             id=uuid4(),
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256=sha256,
             retention_until=retention_until,
         )
         self._session.add(manuscript)

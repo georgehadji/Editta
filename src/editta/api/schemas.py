@@ -1,4 +1,5 @@
-"""Request/response DTOs and the {success, data, error, meta} response envelope."""
+"""Request/response DTOs and the {success, data, error} envelope of a successful
+response. Errors are FastAPI's own {"detail": ...} body, not an envelope."""
 
 from typing import Literal
 from uuid import UUID
@@ -10,15 +11,10 @@ class Envelope[T](BaseModel):
     success: bool
     data: T | None = None
     error: str | None = None
-    meta: dict[str, object] | None = None
 
     @classmethod
-    def ok(cls, data: T, *, meta: dict[str, object] | None = None) -> "Envelope[T]":
-        return cls(success=True, data=data, error=None, meta=meta)
-
-    @classmethod
-    def fail(cls, error: str) -> "Envelope[None]":
-        return Envelope[None](success=False, data=None, error=error, meta=None)
+    def ok(cls, data: T) -> "Envelope[T]":
+        return cls(success=True, data=data, error=None)
 
 
 class MagicLinkRequest(BaseModel):

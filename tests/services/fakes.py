@@ -57,7 +57,6 @@ class FakeManuscriptRepo:
         tenant_id: UUID,
         title: str,
         blob_key: str,
-        sha256: str,
         retention_until: Any = None,
     ) -> _ManuscriptRecord:
         record = _ManuscriptRecord(tenant_id, blob_key, title, retention_until)

@@ -1,4 +1,4 @@
-"""DOCX -> normalized text + section map."""
+"""DOCX -> normalized text."""
 
 import io
 from typing import Any
@@ -10,8 +10,6 @@ from docx.text.paragraph import Paragraph
 
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
-
-_HEADING_PREFIX = "Heading"
 
 
 def _outside_text_boxes(tag: str, root: Any) -> list[Any]:
@@ -57,17 +55,10 @@ def extract_docx(data: bytes, filename: str) -> ManuscriptText:
         # Not the exception text: parser errors can quote the document.
         raise ParseError("failed to parse .docx") from exc
 
-    lines: list[str] = []
-    sections: list[str] = []
-    for paragraph in docx_body_paragraphs(document):
-        text = paragraph_text(paragraph).strip()
-        style_name = paragraph.style.name if paragraph.style else ""
-        if style_name.startswith(_HEADING_PREFIX):
-            sections.append(text)
-        lines.append(text)
-
-    full_text = "\n".join(lines)
+    full_text = "\n".join(
+        paragraph_text(paragraph).strip() for paragraph in docx_body_paragraphs(document)
+    )
     if not full_text.strip():
         raise ParseError("document contains no extractable text")
 
-    return ManuscriptText(source_filename=filename, text=full_text, sections=tuple(sections))
+    return ManuscriptText(source_filename=filename, text=full_text)
