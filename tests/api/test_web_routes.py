@@ -30,6 +30,7 @@ from editta.api.deps import (
     get_tenant_repo,
 )
 from editta.api.main import app
+from editta.api.routes.web import _any_job_running
 from editta.config import Settings
 from editta.services.billing import BillingService
 from tests.services.fakes import (
@@ -301,3 +302,24 @@ def test_an_unfinished_job_offers_no_download() -> None:
     html = _rendered_job_list(state="analyzing", kinds=set())
     assert "/download" not in html
     assert "annotated_manuscript" not in html
+
+
+def test_the_job_table_asks_for_itself_only_while_a_job_is_running() -> None:
+    template = get_templates().get_template("_job_list.html")
+    context = {"tenant_id": TENANT_ID, "jobs": [], "artifacts": {}}
+
+    assert "hx-trigger" in template.render(**context, polling=True)
+    assert "hx-trigger" not in template.render(**context, polling=False)
+
+
+@pytest.mark.parametrize(
+    ("states", "running"),
+    [
+        (["completed", "dead", "cancelled"], False),
+        ([], False),
+        (["completed", "analyzing"], True),
+        (["failed"], True),  # between a failed attempt and its retry
+    ],
+)
+def test_a_job_is_running_until_it_reaches_a_final_state(states: list[str], running: bool) -> None:
+    assert _any_job_running(states) is running

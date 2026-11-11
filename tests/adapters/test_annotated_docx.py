@@ -331,3 +331,66 @@ def test_the_comment_names_the_pass_the_severity_and_that_it_is_machine_made() -
     assert text.startswith("[major] Γλώσσα — πρόβλημα")
     assert "Πρόταση: διόρθωση" in text
     assert "Αυτόματη" in text
+
+
+# --- text Word keeps outside direct runs: tracked insertions, tables --------------------
+
+
+def _run(text: str) -> str:
+    return f"<w:r {_W}><w:t>{text}</w:t></w:r>"
+
+
+def _inserted(text: str) -> str:
+    return (
+        f'<w:ins {_W} w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z">'
+        f"<w:r><w:t>{text}</w:t></w:r></w:ins>"
+    )
+
+
+def _paragraph_doc(*children: str) -> bytes:
+    document = docx.Document()
+    paragraph = document.add_paragraph()
+    for xml in children:
+        paragraph._p.append(parse_xml(xml))
+    return _save(document)
+
+
+def test_a_quote_in_plain_text_is_commented_beside_a_tracked_insertion() -> None:
+    source = _paragraph_doc(_run("Έχει ένα σφάλμα εδώ."), _inserted(" Και μια προσθήκη."))
+    out = AnnotatedManuscriptExporter().build(_context(source, [_finding("ένα σφάλμα")]))
+
+    assert out is not None
+    paragraph = docx.Document(io.BytesIO(out)).paragraphs[0]._p
+    assert _commented_text(paragraph) == ["ένα σφάλμα"]
+    assert _all_text(out) == _all_text(source)
+
+
+def test_a_quote_inside_a_tracked_insertion_is_left_unplaced() -> None:
+    source = _paragraph_doc(_run("Έχει ένα σφάλμα εδώ."), _inserted(" Και μια προσθήκη."))
+    assert AnnotatedManuscriptExporter().build(_context(source, [_finding("μια προσθήκη")])) is None
+
+
+def test_a_run_carrying_word_s_page_break_note_can_still_be_cut() -> None:
+    marked = f"<w:r {_W}><w:lastRenderedPageBreak/><w:t>Έχει ένα σφάλμα εδώ.</w:t></w:r>"
+    source = _paragraph_doc(marked)
+
+    out = AnnotatedManuscriptExporter().build(_context(source, [_finding("ένα σφάλμα")]))
+
+    assert out is not None
+    paragraph = docx.Document(io.BytesIO(out)).paragraphs[0]._p
+    assert _commented_text(paragraph) == ["ένα σφάλμα"]
+    assert _all_text(out) == _all_text(source)
+    assert len(paragraph.findall(f".//{qn('w:lastRenderedPageBreak')}")) == 1
+
+
+def test_a_quote_in_a_table_cell_is_commented_in_that_cell() -> None:
+    document = docx.Document()
+    document.add_paragraph("Πρώτη παράγραφος.")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "Ο πίνακας έχει ένα σφάλμα εδώ."
+    source = _save(document)
+
+    out = AnnotatedManuscriptExporter().build(_context(source, [_finding("ένα σφάλμα")]))
+
+    assert out is not None
+    assert _commented_text(docx.Document(io.BytesIO(out)).element.body) == ["ένα σφάλμα"]
+    assert _all_text(out) == _all_text(source)

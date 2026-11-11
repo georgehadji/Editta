@@ -6,10 +6,10 @@ The editor opens the author's file and sees the findings where they belong; the 
 own comments and tracked changes are untouched.
 
 Anything that cannot be commented without risk is left unplaced -- a few correct comments
-beat many misplaced ones: text inside a field or a hyperlink, a quote that runs across a
-paragraph, an edge that would cut a run holding more than plain text (a tab, a picture, a
-footnote mark). Offsets come from domain/placement.py over the paragraphs that
-adapters/parsing/docx.py reads, so the two cannot drift apart.
+beat many misplaced ones: text inside a field, a hyperlink, a tracked insertion or a content
+control, a quote that runs across a paragraph, an edge that would cut a run holding more
+than plain text (a tab, a picture, a footnote mark). Offsets come from domain/placement.py
+over the paragraphs that adapters/parsing/docx.py reads, so the two cannot drift apart.
 """
 
 import copy
@@ -21,11 +21,10 @@ from dataclasses import dataclass
 import docx
 import structlog
 from docx.oxml.ns import qn
-from docx.text.hyperlink import Hyperlink
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from editta.adapters.parsing.docx import docx_body_paragraphs
+from editta.adapters.parsing.docx import docx_body_paragraphs, paragraph_text, run_elements
 from editta.adapters.parsing.safety import ManuscriptFormat, validate_upload
 from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.models import Finding
@@ -65,40 +64,48 @@ def comment_text(pass_name: str, finding: Finding) -> str:
 
 @dataclass(slots=True)
 class _Segment:
-    """A stretch of a paragraph's text and the run that holds it (None: a hyperlink)."""
+    """A stretch of a paragraph's text and the run that holds it (None: a hyperlink, a
+    tracked insertion, a content control or any other wrapper around runs)."""
 
     start: int
     end: int
     run: Run | None
-    plain: bool  # outside any field or hyperlink: may carry a comment edge
+    plain: bool  # a direct run outside any field: may carry a comment edge
 
 
 def _segments(paragraph: Paragraph) -> list[_Segment] | None:
-    """The paragraph's text laid out run by run. None if this does not add up to
-    `paragraph.text`, i.e. python-docx and this walk disagree about the paragraph."""
+    """The paragraph's text laid out child by child. None if this does not add up to
+    `paragraph_text`, i.e. the two walks disagree about the paragraph."""
     segments: list[_Segment] = []
     position = 0
     field_depth = 0
-    for item in paragraph.iter_inner_content():
-        length = len(item.text)
-        if isinstance(item, Hyperlink):
-            segments.append(_Segment(position, position + length, None, plain=False))
-        else:
-            field_marks = item._r.xpath("w:fldChar/@w:fldCharType")
+    for child in paragraph._p:
+        if child.tag == qn("w:r"):
+            run = Run(child, paragraph)
+            length = len(run.text)
+            field_marks = child.xpath("w:fldChar/@w:fldCharType")
             in_field = field_depth > 0 or bool(field_marks)
             # shortcut: a field that starts in one paragraph and ends in a later one is
             # not tracked across the break; its tail reads as plain text. Rare (a TOC).
             field_depth = max(
                 0, field_depth + field_marks.count("begin") - field_marks.count("end")
             )
-            segments.append(_Segment(position, position + length, item, plain=not in_field))
+            segments.append(_Segment(position, position + length, run, plain=not in_field))
+        else:
+            length = sum(len(r.text) for r in run_elements(child))
+            segments.append(_Segment(position, position + length, None, plain=False))
         position += length
-    return segments if position == len(paragraph.text) else None
+    return segments if position == len(paragraph_text(paragraph)) else None
+
+
+# Not content: formatting, and Word's note of where a page last broke (it re-writes it on
+# the next save, and every run that crosses a page boundary carries one).
+_NOT_CONTENT = (qn("w:rPr"), qn("w:lastRenderedPageBreak"))
 
 
 def _only_text(run: Run) -> bool:
     """A run of one `w:t` and formatting: the only kind this cuts in two."""
-    kids = [child for child in run._r if child.tag != qn("w:rPr")]
+    kids = [child for child in run._r if child.tag not in _NOT_CONTENT]
     return len(kids) == 1 and kids[0].tag == qn("w:t")
 
 
@@ -110,6 +117,8 @@ def _split_at(paragraph: Paragraph, offset: int) -> None:
             text = text_element.text or ""
             cut = offset - segment.start
             right = copy.deepcopy(element)
+            for marker in right.findall(qn("w:lastRenderedPageBreak")):
+                right.remove(marker)  # the break belongs before the left half's text only
             element.addnext(right)
             right_text = right.find(qn("w:t"))
             text_element.text, right_text.text = text[:cut], text[cut:]
@@ -149,7 +158,7 @@ class AnnotatedManuscriptBuilder:
         """The commented file, or None when there is nothing to comment or the paragraphs
         here are not the ones the analysis read."""
         paragraphs = docx_body_paragraphs(self._document)
-        raw_texts = [p.text for p in paragraphs]
+        raw_texts = [paragraph_text(p) for p in paragraphs]
         texts = [t.strip() for t in raw_texts]
         if "\n".join(texts) != manuscript_text:
             logger.warning("export.annotated_text_mismatch")

@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from editta.adapters.email.console import ConsoleEmailSender
 from editta.adapters.email.smtp import SMTPEmailSender
-from editta.adapters.llm import build_llm_client
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     AuditEventRepository,
@@ -28,7 +27,7 @@ from editta.adapters.persistence.repositories import (
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import Settings, load_settings
-from editta.domain.ports import BlobStore, EmailSender, LLMClient
+from editta.domain.ports import BlobStore, EmailSender
 from editta.services.accounts import AccountService, AuthenticatedUser, InvalidSession
 from editta.services.billing import BillingService
 
@@ -71,16 +70,6 @@ def get_blob_store() -> BlobStore:
         endpoint_url=settings.s3_endpoint_url,
         access_key=settings.s3_access_key,
         secret_key=settings.s3_secret_key,
-    )
-
-
-@lru_cache
-def get_llm_client() -> LLMClient:
-    settings = get_settings()
-    return build_llm_client(
-        anthropic_api_key=settings.anthropic_api_key,
-        openrouter_api_key=settings.openrouter_api_key,
-        max_concurrency=settings.max_llm_concurrency,
     )
 
 

@@ -156,9 +156,7 @@ class AccountService:
             user = await users.get_by_email(tenant_id, email)
         if user is None:
             return None
-        token = str(
-            self._magic_link_serializer.dumps({"tenant_id": str(tenant_id), "email": email})
-        )
+        token = self.issue_magic_link_token(tenant_id=tenant_id, email=email)
         return LoginLink(to_email=email, url=login_link(base_url, tenant_id, token))
 
     async def complete_login(
@@ -196,10 +194,6 @@ class AccountService:
     def issue_magic_link_token(self, *, tenant_id: UUID, email: str) -> str:
         payload = {"tenant_id": str(tenant_id), "email": normalize_email(email)}
         return str(self._magic_link_serializer.dumps(payload))
-
-    def verify_magic_link_token(self, token: str) -> tuple[UUID, str]:
-        tenant_id, email, _ = self._open_magic_link_token(token)
-        return tenant_id, email
 
     def _open_magic_link_token(self, token: str) -> tuple[UUID, str, datetime]:
         try:

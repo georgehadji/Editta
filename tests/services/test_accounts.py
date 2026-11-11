@@ -30,26 +30,24 @@ async def _with_user(
     return _service(users), users, tenant_id
 
 
-def test_issue_then_verify_round_trips() -> None:
-    service = _service()
-    tenant_id = uuid4()
+async def test_issue_then_open_round_trips() -> None:
+    service, _, tenant_id = await _with_user()
 
     token = service.issue_magic_link_token(tenant_id=tenant_id, email="editor@example.com")
-    verified_tenant_id, email = service.verify_magic_link_token(token)
+    user = await service.complete_login(token, consume=False)
 
-    assert verified_tenant_id == tenant_id
-    assert email == "editor@example.com"
+    assert (user.tenant_id, user.email) == (tenant_id, "editor@example.com")
 
 
-def test_verify_rejects_tampered_token() -> None:
+async def test_a_tampered_token_is_rejected() -> None:
     service = _service()
     token = service.issue_magic_link_token(tenant_id=uuid4(), email="editor@example.com")
 
     with pytest.raises(InvalidMagicLink, match="invalid"):
-        service.verify_magic_link_token(token + "tampered")
+        await service.complete_login(token + "tampered", consume=False)
 
 
-def test_verify_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_an_expired_token_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     # itsdangerous owns the actual clock-based expiry math; we only need to verify
     # that AccountService translates SignatureExpired into our own InvalidMagicLink.
     service = _service()
@@ -60,7 +58,7 @@ def test_verify_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service._magic_link_serializer, "loads", _raise_expired)
 
     with pytest.raises(InvalidMagicLink, match="expired"):
-        service.verify_magic_link_token("irrelevant-token")
+        await service.complete_login("irrelevant-token", consume=False)
 
 
 def test_max_age_constant_is_fifteen_minutes() -> None:

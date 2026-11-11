@@ -5,6 +5,7 @@ tenant admin shares this tenant-specific login URL with their editors directly.
 
 import hmac
 import secrets
+from collections.abc import Iterable
 from typing import Annotated
 from uuid import UUID
 
@@ -51,6 +52,7 @@ from editta.config import Settings
 from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore, EmailSender
+from editta.domain.states import TERMINAL_STATES, JobState
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
     AccountService,
@@ -261,6 +263,7 @@ async def dashboard(
             "tenant_id": tenant_id,
             "email": auth.email,
             "jobs": job_list,
+            "polling": _any_job_running(j.state for j in job_list),
             "artifacts": artifacts,
             "credit_balance": balance,
             "csrf_token": request.cookies.get("editta_csrf", ""),
@@ -337,8 +340,19 @@ async def _job_list(
     return templates.TemplateResponse(
         request,
         "_job_list.html",
-        {"tenant_id": tenant_id, "jobs": job_list, "artifacts": artifacts},
+        {
+            "tenant_id": tenant_id,
+            "jobs": job_list,
+            "polling": _any_job_running(j.state for j in job_list),
+            "artifacts": artifacts,
+        },
     )
+
+
+def _any_job_running(states: Iterable[str]) -> bool:
+    """Whether the job table still has something to wait for. Once every job is finished
+    the table stops asking for itself; an upload brings a fresh table that starts again."""
+    return any(JobState(state) not in TERMINAL_STATES for state in states)
 
 
 @router.get("/t/{tenant_id}/jobs/{job_id}/artifacts/{kind}")

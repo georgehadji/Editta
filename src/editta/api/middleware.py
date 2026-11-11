@@ -15,6 +15,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from editta.adapters.parsing.safety import MAX_UPLOAD_BYTES
 from editta.api.deps import SESSION_COOKIE_NAME, get_settings
+from editta.config import rate_limit_storage_uri
 from editta.services.accounts import session_rate_limit_subject
 
 # The upload limit plus a MiB of multipart framing and form fields; the precise 25 MB
@@ -54,7 +55,20 @@ def _rate_limit_key(request: Request) -> str:
     return f"ip:{request.client.host if request.client else 'unknown'}"
 
 
-limiter = Limiter(key_func=_rate_limit_key, default_limits=["120/minute"])
+def build_limiter(storage_uri: str | None) -> Limiter:
+    """With no `storage_uri` the counters live in this process. With one, every API
+    process counts in the same store, so the limits mean what they say. If that store is
+    unreachable the check is skipped (requests are not failed): limits lapse during the
+    outage rather than taking the site down with it."""
+    return Limiter(
+        key_func=_rate_limit_key,
+        default_limits=["120/minute"],
+        storage_uri=storage_uri,
+        swallow_errors=storage_uri is not None,
+    )
+
+
+limiter = build_limiter(rate_limit_storage_uri())
 
 # Each sign-in link request can send an email to an inbox that is not the caller's, so it
 # gets a much tighter limit than the default. Keyed per IP like the rest: behind a proxy
