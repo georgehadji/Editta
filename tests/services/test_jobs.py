@@ -21,7 +21,7 @@ from editta.domain.models import (
     PromptParts,
     SynthesisPlan,
 )
-from editta.domain.states import JobState, retry_delay_seconds
+from editta.domain.states import CUSTOMER_FAILURE, JobState, retry_delay_seconds
 from editta.observability import configure_logging
 from editta.services.jobs import DEFAULT_EXPORTERS, JobRunner, _pass_checkpoint_key
 from tests.fakes import FailureRule, FakeLLMClient
@@ -251,6 +251,7 @@ async def test_projected_budget_over_ceiling_dies_before_any_billable_call() -> 
     assert h.llm.calls == []  # the guardrail now exists on the worker path too
     assert h.uow.jobs.state_history[-1][0] is JobState.DEAD
     assert h.ledger("refund") == [1]
+    assert h.job.failure_kind == CUSTOMER_FAILURE  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -266,6 +267,7 @@ async def test_too_long_manuscript_dies_with_token_message_and_refund() -> None:
     assert outcome.kind is JobOutcomeKind.DEAD
     assert "800,000 tokens" in (outcome.error or "")
     assert h.ledger("refund") == [1]
+    assert h.job.failure_kind == CUSTOMER_FAILURE  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -386,6 +388,7 @@ async def test_retryable_failure_on_last_attempt_goes_dead_and_refunds() -> None
 
     assert outcome.kind is JobOutcomeKind.DEAD
     assert h.ledger("refund") == [1]
+    assert h.job.failure_kind is None  # type: ignore[attr-defined]  # ours: the queue check pages
 
 
 _CUT_OFF = LLMUsage(input_tokens=700, output_tokens=64_000, cache_read_tokens=300)
@@ -476,6 +479,7 @@ async def test_unparseable_manuscript_dies_immediately() -> None:
     assert outcome.kind is JobOutcomeKind.DEAD
     assert h.llm.calls == []
     assert h.ledger("refund") == [1]
+    assert h.job.failure_kind == CUSTOMER_FAILURE  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -488,6 +492,7 @@ async def test_missing_manuscript_does_not_mint_a_credit() -> None:
     assert outcome.kind is JobOutcomeKind.DEAD
     # The upload's reservation is refunded, so the net is zero.
     assert sum(h.ledger("job") + h.ledger("refund")) == 0
+    assert h.job.failure_kind is None  # type: ignore[attr-defined]  # a lost row is ours
 
 
 @pytest.mark.asyncio

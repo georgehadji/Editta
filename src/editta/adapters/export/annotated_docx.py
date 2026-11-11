@@ -14,7 +14,6 @@ over the paragraphs that adapters/parsing/docx.py reads, so the two cannot drift
 
 import copy
 import io
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -29,6 +28,7 @@ from editta.adapters.parsing.safety import ManuscriptFormat, validate_upload
 from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.models import Finding
 from editta.domain.placement import place_findings
+from editta.domain.xmltext import strip_xml_illegal
 
 logger = structlog.get_logger(__name__)
 
@@ -47,16 +47,13 @@ PASS_LABELS = {
 SUGGESTION_LABEL = "Πρόταση"
 MACHINE_NOTE = "Αυτόματη παρατήρηση του Editta: η κρίση ανήκει στον επιμελητή."
 
-# lxml refuses these in XML text, and model output is not trusted to avoid them.
-_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
-
 
 def comment_text(pass_name: str, finding: Finding) -> str:
     label = PASS_LABELS.get(pass_name, pass_name)
     lines = [f"[{finding.severity.value}] {label} — {finding.issue}"]
     if finding.suggestion:
         lines.append(f"{SUGGESTION_LABEL}: {finding.suggestion}")
-    text = _XML_ILLEGAL.sub("", "\n".join(lines))
+    text = strip_xml_illegal("\n".join(lines))
     if len(text) > MAX_COMMENT_CHARS:
         text = text[: MAX_COMMENT_CHARS - 1] + "…"
     return f"{text}\n{MACHINE_NOTE}"

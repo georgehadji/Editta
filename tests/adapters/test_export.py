@@ -57,6 +57,36 @@ def test_build_produces_valid_docx_with_no_score_or_verdict_text() -> None:
         assert banned not in full_text
 
 
+def test_control_characters_in_model_text_do_not_fail_the_report() -> None:
+    """The model's own words (not only the manuscript's) can carry characters XML forbids."""
+    dirty = FINDING.model_copy(
+        update={"issue": "bad\x0bissue", "suggestion": "fix\x00this", "section": "in\x1ftro"}
+    )
+    report = REPORT.model_copy(
+        update={
+            "synthesis": SynthesisReport(
+                overview="over\x08view",
+                sections=[
+                    SynthesisSection(title="Lang\x0cuage", summary="a\x01b", findings=[dirty])
+                ],
+            ),
+            "pass_results": (
+                PassResult(
+                    pass_name="language",  # noqa: S106 -- trips the hardcoded-password heuristic
+                    findings=[dirty],
+                    usage=LLMUsage(input_tokens=1, output_tokens=1),
+                ),
+            ),
+        }
+    )
+
+    document = docx.Document(io.BytesIO(ReportDocxBuilder(report).build()))
+    full_text = "\n".join(p.text for p in document.paragraphs)
+
+    assert "badissue" in full_text
+    assert "overview" in full_text
+
+
 @pytest.mark.asyncio
 async def test_report_for_a_pdf_with_control_characters_exports() -> None:
     """Regression (hunt D1): a control character in the PDF reached a quoted finding and

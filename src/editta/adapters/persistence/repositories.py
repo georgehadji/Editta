@@ -181,6 +181,7 @@ class AnalysisJobRepository:
         lease_owner: str,
         state: str,
         error: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
         """Fenced state write for the job runner: applies only while `lease_owner` still
         holds the job. Raises LeaseLost otherwise — a worker whose lease expired must
@@ -193,7 +194,7 @@ class AnalysisJobRepository:
                 AnalysisJob.id == job_id,
                 AnalysisJob.lease_owner == lease_owner,
             )
-            .values(state=state, error=error)
+            .values(state=state, error=error, failure_kind=failure_kind)
         )
         if result.rowcount != 1:  # type: ignore[attr-defined]
             raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")

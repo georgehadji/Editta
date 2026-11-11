@@ -79,6 +79,7 @@ class _JobRecord:
         self.manuscript_id = manuscript_id
         self.state = JobState.PENDING
         self.error: str | None = None
+        self.failure_kind: str | None = None
         self.attempt = 0
         self.lease_owner: str | None = None
         self.cost_input_tokens = 0
@@ -126,12 +127,14 @@ class FakeAnalysisJobRepo:
         lease_owner: str,
         state: str,
         error: str | None = None,
+        failure_kind: str | None = None,
     ) -> None:
         record = self._records.get((tenant_id, job_id))
         if record is None or record.lease_owner != lease_owner:
             raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
         self.state_history.append((JobState(state), error))
         record.state, record.error = JobState(state), error
+        record.failure_kind = failure_kind
 
     async def record_usage(
         self,

@@ -122,8 +122,8 @@ migrations 0002-0003; both refuse to start on a role without it):
   or as cron: `15 3 * * * cd /srv/editta && .venv/bin/python -m editta.worker.retention`.
 
 - **The queue check** tells you when jobs are stuck. It runs once, prints one line and
-  exits 1 if a job was dead-lettered in the last 24 h or a claimable job has waited over an
-  hour. Schedule it every 5-15 minutes and alert on a non-zero exit.
+  exits 1 if a job was dead-lettered in the last 24 h (not counting files the customer got
+  wrong, such as a scanned PDF) or a claimable job has waited over an hour. Schedule it every 5-15 minutes and alert on a non-zero exit.
 
   ```bash
   python -m editta.worker.ops_check

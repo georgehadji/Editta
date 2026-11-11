@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,6 +16,7 @@ from editta.api.routes import billing as billing_routes
 from editta.services.billing import BillingService
 
 TENANT_ID = uuid4()
+UNKNOWN_TENANTS: set[UUID] = set()
 
 
 class _EchoStripeClient:
@@ -37,6 +38,12 @@ def ledger() -> Iterator[dict[str, int]]:
         async def append_once(self, *, delta: int, idempotency_key: str, **_: object) -> None:
             entries.setdefault(idempotency_key, delta)
 
+    class FakeTenants:
+        def __init__(self, session: object) -> None: ...
+
+        async def get_by_id(self, tenant_id: UUID) -> object | None:
+            return None if tenant_id in UNKNOWN_TENANTS else object()
+
     @asynccontextmanager
     async def begin(tenant_id: object):  # noqa: ANN202
         yield object()
@@ -51,10 +58,14 @@ def ledger() -> Iterator[dict[str, int]]:
     )
     app.dependency_overrides[deps.get_billing_service] = lambda: billing
     app.dependency_overrides[deps.get_uow] = lambda: SimpleNamespace(begin=begin)
-    original = billing_routes.CreditLedgerRepository
+    original_ledger = billing_routes.CreditLedgerRepository
+    original_tenants = billing_routes.TenantRepository
     billing_routes.CreditLedgerRepository = FakeLedger  # type: ignore[misc,assignment]
+    billing_routes.TenantRepository = FakeTenants  # type: ignore[misc,assignment]
+    UNKNOWN_TENANTS.clear()
     yield entries
-    billing_routes.CreditLedgerRepository = original  # type: ignore[misc]
+    billing_routes.CreditLedgerRepository = original_ledger  # type: ignore[misc]
+    billing_routes.TenantRepository = original_tenants  # type: ignore[misc]
     app.dependency_overrides.clear()
 
 
@@ -86,6 +97,23 @@ def test_delayed_payment_credits_once_when_the_money_arrives(ledger: dict[str, i
             assert response.status_code == 200
 
     assert ledger == {"stripe:evt_2": 10}
+
+
+def test_a_purchase_for_a_tenant_we_do_not_have_is_acknowledged_not_a_500(
+    ledger: dict[str, int],
+) -> None:
+    """Another environment on the same Stripe account: a 500 would make Stripe retry for days."""
+    UNKNOWN_TENANTS.add(TENANT_ID)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/billing/webhook",
+            json=_event("evt_4", "checkout.session.completed", "paid"),
+            headers={"stripe-signature": "s"},
+        )
+
+    assert response.status_code == 200
+    assert ledger == {}
 
 
 def test_checkout_without_our_metadata_is_acknowledged_not_a_500(ledger: dict[str, int]) -> None:

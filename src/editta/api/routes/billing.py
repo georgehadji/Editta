@@ -9,13 +9,16 @@ dependency chain, which requires an authenticated request. Stripe isn't logged i
 import asyncio
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from editta.adapters.persistence.repositories import CreditLedgerRepository
+from editta.adapters.persistence.repositories import CreditLedgerRepository, TenantRepository
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.api.deps import AuthContext, get_billing_service, get_current_auth, get_uow
 from editta.services.billing import BillingService, WebhookVerificationError
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 
@@ -49,6 +52,12 @@ async def stripe_webhook(
     purchase = billing.extract_purchase(event)
     if purchase is not None:
         async with uow.begin(purchase.tenant_id) as session:
+            # A tenant this database does not know (another environment sharing the Stripe
+            # account): the foreign key would fail with a 500 and Stripe would retry for
+            # days. Acknowledge it, like an event with no tenant at all.
+            if await TenantRepository(session).get_by_id(purchase.tenant_id) is None:
+                logger.warning("billing.event_for_unknown_tenant", event_id=event["id"])
+                return {"received": True}
             # Stripe redelivers webhooks; append_once keys on the event id, so a
             # replay is a no-op (ON CONFLICT DO NOTHING) rather than a double credit
             # or an aborted transaction.

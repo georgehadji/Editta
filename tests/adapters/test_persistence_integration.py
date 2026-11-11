@@ -371,7 +371,15 @@ async def test_queue_health_counts_dead_jobs_and_the_oldest_claimable_wait(
 
     tenant_id, _, waiting_id = await _seed_job(pg_worker_factory)
     _, _, dead_id = await _seed_job(pg_worker_factory)
+    _, _, customer_dead_id = await _seed_job(pg_worker_factory)
     async with pg_worker_factory() as session:
+        # A scanned PDF: refunded, the customer's input, not worth an alert.
+        await session.execute(
+            text(
+                "UPDATE analysis_jobs SET state = 'dead', failure_kind = 'customer' WHERE id = :i"
+            ),
+            {"i": customer_dead_id},
+        )
         await session.execute(
             text("UPDATE analysis_jobs SET created_at = now() - interval '2 hours' WHERE id = :i"),
             {"i": waiting_id},

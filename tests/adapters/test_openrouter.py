@@ -321,6 +321,43 @@ async def test_request_rejections_are_not_retried(status: int) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refusal_that_quotes_the_input_does_not_reach_the_error() -> None:
+    """Moderation refusals carry a snippet of the input; the message ends up in job.error."""
+    snippet = "ΕΜΠΙΣΤΕΥΤΙΚΟ απόσπασμα χειρογράφου"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {"error": {"code": 403, "metadata": {"flagged_input": snippet}}}
+        return httpx.Response(403, json=body)
+
+    with pytest.raises(LLMRequestRejected) as caught:
+        await _client(handler).analyze(
+            PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS
+        )
+    assert "403" in str(caught.value)
+    assert snippet not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_an_in_stream_provider_error_reports_its_code_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", _noop_sleep)
+    snippet = "ΕΜΠΙΣΤΕΥΤΙΚΟ απόσπασμα χειρογράφου"
+    client = _client(
+        lambda request: _sse({"error": {"code": 502, "message": f"upstream said: {snippet}"}})
+    )
+
+    with pytest.raises(LLMError) as caught:
+        await client.analyze(PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS)
+    assert "502" in str(caught.value)
+    assert snippet not in str(caught.value)
+
+
+async def _noop_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
 async def test_transient_failures_are_retried_then_succeed() -> None:
     responses = iter(
         [
