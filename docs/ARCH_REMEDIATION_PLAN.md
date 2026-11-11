@@ -183,6 +183,19 @@ trigger to adopt it is in "Switching triggers" below.
 
 **Done when.** One `llm.call` line per model call, with latency, in the worker's output.
 
+**Implemented as (PR 2), where it differs from the text above.**
+- `_RedactTokens` stays in `api/main.py`: it is an uvicorn access-log filter, API-only, and
+  `tests/api/test_access_log.py` imports it from there.
+- The scrub replaces a too-long string or raw bytes with a fixed placeholder instead of dropping
+  the key, so a reader still sees that a field was there.
+- `InstrumentedLLMClient` is wired in `worker/main.py`, the composition root, not inside
+  `build_llm_client`, so the factory keeps returning the concrete adapters its tests check.
+- `cli.py` is not configured: it is the operator's own local run, and its stdout carries the
+  report summary. The API does not bind `tenant_id` per request; request id only.
+- Job context is bound in `JobRunner.run` (`job_id`, `tenant_id`, `attempt`) and in
+  `Worker._process` (adds `worker_id`, and covers the heartbeat task); `pass_name` is bound
+  around each model call in `services/analysis.py`.
+
 ---
 
 ## Item 4: Health, readiness and an alertable ops check (A-4, A-11)

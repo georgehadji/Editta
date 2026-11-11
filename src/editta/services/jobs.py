@@ -178,6 +178,13 @@ class JobRunner:
         self._synthesis_timeout = synthesis_timeout_seconds
 
     async def run(self, job: ClaimedJob) -> JobOutcome:
+        # Every log line written while this job runs carries who and which attempt.
+        with structlog.contextvars.bound_contextvars(
+            job_id=str(job.job_id), tenant_id=str(job.tenant_id), attempt=job.attempt
+        ):
+            return await self._run(job)
+
+    async def _run(self, job: ClaimedJob) -> JobOutcome:
         if attempts_exhausted(job.attempt):
             # Earlier attempts ended without recording anything (crash, OOM, lost
             # lease) — the claim counted them anyway. Stop instead of looping forever.
@@ -214,7 +221,7 @@ class JobRunner:
                     cache_read_tokens=usage.cache_read_tokens,
                 )
         except Exception:
-            logger.exception("worker.failed_spend_unrecorded", job_id=str(job.job_id))
+            logger.exception("worker.failed_spend_unrecorded")
 
     async def _execute(self, job: ClaimedJob) -> None:
         llm = _RecordFailedSpend(self._llm, lambda usage: self._record_usage(job, usage))
@@ -377,11 +384,10 @@ class JobRunner:
         retryable = exc.retryable if isinstance(exc, EdittaError) else True
         decision = decide_after_failure(attempts_made=job.attempt, retryable=retryable)
         error = _error_message(exc)
-        log = logger.bind(job_id=str(job.job_id), tenant_id=str(job.tenant_id))
         if isinstance(exc, EdittaError):
-            log.warning("job.attempt_failed", error=error, attempt=job.attempt)
+            logger.warning("job.attempt_failed", error=error)
         else:
-            log.exception("job.attempt_crashed", attempt=job.attempt)
+            logger.exception("job.attempt_crashed")
 
         if decision.retry_after_seconds is None:  # terminal: retrying cannot help
             return await self._dead_letter(job, error)
@@ -421,5 +427,5 @@ class JobRunner:
         return JobOutcome.dead(error=error)
 
     def _abandon(self, job: ClaimedJob, exc: LeaseLost) -> JobOutcome:
-        logger.warning("job.lease_lost", job_id=str(job.job_id), worker=job.lease_owner)
+        logger.warning("job.lease_lost", worker=job.lease_owner)
         return JobOutcome.abandoned(error=str(exc))

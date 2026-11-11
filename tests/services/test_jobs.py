@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -7,7 +8,9 @@ from uuid import uuid4
 
 import docx
 import pytest
+import structlog
 
+from editta.adapters.llm.instrumented import InstrumentedLLMClient
 from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, ParseError
 from editta.domain.models import (
@@ -19,6 +22,7 @@ from editta.domain.models import (
     SynthesisPlan,
 )
 from editta.domain.states import JobState, retry_delay_seconds
+from editta.observability import configure_logging
 from editta.services.jobs import DEFAULT_EXPORTERS, JobRunner, _pass_checkpoint_key
 from tests.fakes import FailureRule, FakeLLMClient
 from tests.services.fakes import FakeBlobStore, FakeJobUnitOfWork, _PassResultRecord
@@ -282,6 +286,33 @@ async def test_retryable_failure_keeps_sibling_checkpoints_and_backs_off() -> No
     assert await h.checkpointed() == {"language", "metadata", "integrity"}
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []  # not refunded: the job is still going to run
+
+
+@pytest.mark.asyncio
+async def test_every_model_call_is_logged_with_the_job_and_pass_it_belongs_to(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("worker")
+    h = Harness(llm=InstrumentedLLMClient(FakeLLMClient(manuscript_text=MANUSCRIPT_TEXT)))  # type: ignore[arg-type]
+
+    outcome = await h.runner.run(h.claimed())
+    structlog.reset_defaults()
+
+    assert outcome.kind is JobOutcomeKind.COMPLETED
+    out = capsys.readouterr().out
+    calls = [json.loads(x) for x in out.splitlines() if x.startswith("{")]
+    calls = [x for x in calls if x["event"] == "llm.call"]
+    assert {x["pass_name"] for x in calls} == {
+        "language",
+        "structure",
+        "metadata",
+        "integrity",
+        "synthesis",
+    }
+    assert {(x["job_id"], x["tenant_id"], x["attempt"]) for x in calls} == {
+        (str(h.job_id), str(h.tenant_id), 1)
+    }
+    assert MANUSCRIPT_TEXT not in out
 
 
 class _HangingLLM(FakeLLMClient):

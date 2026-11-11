@@ -1,14 +1,17 @@
-"""CSRF, rate limiting, security headers, request-size cap. Log-scrubbing lives in the
-structlog processor chain configured in api/main.py, not here.
+"""CSRF, rate limiting, security headers, request-size cap, request ids. Log-scrubbing lives
+in the structlog processor chain (observability.py), not here.
 """
 
 import hmac
+import re
 import secrets
+import uuid
 from collections.abc import Awaitable, Callable
 
+import structlog
 from fastapi import Header, HTTPException, Request, Response, status
 from slowapi import Limiter
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -84,6 +87,35 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         for header, value in _SECURITY_HEADERS.items():
             response.headers[header] = value
         return response
+
+
+# A caller-supplied id is only echoed and logged if it is plain: no spaces, quotes or
+# newlines that could forge a log line or a header.
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{8,64}")
+
+
+class RequestContextMiddleware:
+    """Gives every request an id, binds it to every log line written while the request
+    runs, and returns it in `X-Request-ID` so a user's report can be found in the logs.
+    Pure ASGI, so the id covers everything inside it, including the other middleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        supplied = Headers(scope=scope).get("x-request-id", "")
+        request_id = supplied if _REQUEST_ID.fullmatch(supplied) else uuid.uuid4().hex
+
+        async def send_with_id(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["X-Request-ID"] = request_id
+            await send(message)
+
+        with structlog.contextvars.bound_contextvars(request_id=request_id):
+            await self.app(scope, receive, send_with_id)
 
 
 class BodySizeLimitMiddleware:
