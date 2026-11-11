@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import make_url, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from editta.adapters.persistence.repositories import (
@@ -45,7 +46,14 @@ from editta.adapters.queue.postgres import PostgresJobQueue
 from editta.adapters.storage.local import LocalBlobStore
 from editta.cli import grant_credits
 from editta.domain.artifacts import ArtifactKind
-from editta.domain.errors import EdittaError, InsufficientCredits, LeaseLost, LLMError, ParseError
+from editta.domain.errors import (
+    EdittaError,
+    IllegalJobTransition,
+    InsufficientCredits,
+    LeaseLost,
+    LLMError,
+    ParseError,
+)
 from editta.domain.models import JobOutcomeKind, PromptParts
 from editta.domain.states import JobState
 from editta.services.accounts import AccountService
@@ -408,6 +416,47 @@ async def test_dead_job_is_never_claimed_again(
         queue = PostgresJobQueue(session)
         await queue.release(job_id, "w")
         assert await queue.claim(worker_id="w") is None
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_job_cannot_leave_its_state_even_for_its_lease_holder(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, _, job_id = await _seed_job(pg_worker_factory)
+    async with pg_worker_factory() as session:
+        assert await PostgresJobQueue(session).claim(worker_id="w") is not None
+    async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
+        await AnalysisJobRepository(session).set_state_if_owned(
+            tenant_id, job_id, lease_owner="w", state=JobState.DEAD, error="boom"
+        )
+
+    with pytest.raises(IllegalJobTransition):
+        async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
+            await AnalysisJobRepository(session).set_state_if_owned(
+                tenant_id, job_id, lease_owner="w", state=JobState.PENDING
+            )
+    async with UnitOfWork(pg_session_factory).begin(tenant_id) as session:
+        job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
+        assert job is not None and job.state == JobState.DEAD and job.error == "boom"
+
+
+@pytest.mark.asyncio
+async def test_the_database_rejects_state_values_outside_the_enums(
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    _, manuscript_id, job_id = await _seed_job(pg_worker_factory)
+    bad_writes = [
+        ("UPDATE analysis_jobs SET state = 'complete' WHERE id = :i", job_id),
+        ("UPDATE analysis_jobs SET failure_kind = 'customer' WHERE id = :i", job_id),
+        ("UPDATE manuscripts SET status = 'purged' WHERE id = :i", manuscript_id),
+        ("UPDATE manuscripts SET blob_key = '' WHERE id = :i", manuscript_id),
+    ]
+    for sql, row_id in bad_writes:
+        with pytest.raises(IntegrityError, match="ck_"):
+            async with pg_worker_factory() as session:
+                await session.execute(text(sql), {"i": row_id})
+                await session.commit()
 
 
 @pytest.mark.asyncio

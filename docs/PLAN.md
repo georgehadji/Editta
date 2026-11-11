@@ -173,15 +173,20 @@ AuditEvent    (id, tenant_id, actor, action, subject, at)     -- append-only
 
 \* `credit_balance` is a **derived value** — the ledger is the source of truth (immutable, append-only; balance = SUM(delta), cached on Tenant, recomputed on write inside the same transaction).
 
-**Job state machine** (`domain/states.py`, transitions enforced in code + CHECK constraint):
+**Job state machine** (`domain/states.py` `ALLOWED_FROM`; enforced in the same SQL `WHERE` as the
+lease fence by `set_state_if_owned`, and by the CHECK `ck_job_state`, migration 0010):
 
 ```
 PENDING → PARSING → ANALYZING → SYNTHESIZING → EXPORTING → COMPLETED
-   │          │          │            │             │
-   └──────────┴──────────┴────────────┴─────────────┴──► FAILED (retryable ≤3)
-                                                          └──► DEAD (alert)
-CANCELLED reachable from any non-terminal state.
+   ▲  │      │          │            │             │
+   │  └──────┴──────────┴────────────┴─────────────┴──► DEAD (refunded; alert unless customer)
+   └── any unfinished state, after a retryable failure (≤3 attempts, backoff)
+PARSING is also re-entered from any unfinished state when a job resumes.
+COMPLETED and DEAD are terminal: nothing leaves them.
 ```
+
+There is no FAILED state: a failed attempt that will be retried is PENDING with `error` set.
+CANCELLED is not built.
 
 Each pass checkpoint persists to `PassResult` on completion. **Retry resumes from the last checkpoint — completed passes are never re-run and never re-billed in tokens.**
 

@@ -11,8 +11,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from editta.domain.artifacts import ArtifactKind
-from editta.domain.errors import LeaseLost
-from editta.domain.states import JobState
+from editta.domain.errors import IllegalJobTransition, LeaseLost
+from editta.domain.states import ALLOWED_FROM, JobState
 
 
 class _ManuscriptRecord:
@@ -138,6 +138,9 @@ class FakeAnalysisJobRepo:
         record = self._records.get((tenant_id, job_id))
         if record is None or record.lease_owner != lease_owner:
             raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
+        # Same rule as the SQL guard: every runner test also proves its transitions legal.
+        if record.state not in ALLOWED_FROM[JobState(state)]:
+            raise IllegalJobTransition(f"job {job_id}: {record.state} -> {state}")
         self.state_history.append((JobState(state), error))
         record.state, record.error = JobState(state), error
         record.failure_kind = failure_kind
