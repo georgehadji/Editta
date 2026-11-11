@@ -33,7 +33,6 @@ from editta.adapters.persistence.repositories import (
 )
 from editta.api.deps import (
     SESSION_COOKIE_NAME,
-    AuthContext,
     get_account_service,
     get_audit_repo,
     get_blob_store,
@@ -56,6 +55,7 @@ from editta.domain.states import TERMINAL_STATES, JobState
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
     AccountService,
+    AuthenticatedUser,
     InvalidMagicLink,
 )
 from editta.services.reports import report_download
@@ -90,7 +90,7 @@ def _upload_error(
     return response
 
 
-def _require_matching_tenant(auth: AuthContext, tenant_id: UUID) -> None:
+def _require_matching_tenant(auth: AuthenticatedUser, tenant_id: UUID) -> None:
     if auth.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "wrong tenant")
 
@@ -226,7 +226,7 @@ async def confirm_login(
 async def logout(
     request: Request,
     tenant_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
 ) -> Response:
     """Clears this browser's session. (Sessions are stateless signed cookies; revoking
     every session of a user means removing the user — see services/accounts.py.)"""
@@ -246,26 +246,22 @@ async def logout(
 async def dashboard(
     request: Request,
     tenant_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
     ledger: Annotated[CreditLedgerRepository, Depends(get_ledger_repo)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
-    job_list = await jobs.list_for_tenant(tenant_id)
-    artifacts = await reports.kinds_by_job([j.id for j in job_list])
-    balance = await ledger.balance(tenant_id)
+    context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
-            "tenant_id": tenant_id,
+            **context,
             "email": auth.email,
-            "jobs": job_list,
-            "polling": _any_job_running(j.state for j in job_list),
-            "artifacts": artifacts,
-            "credit_balance": balance,
+            "credit_balance": await ledger.balance(tenant_id),
             "csrf_token": request.cookies.get("editta_csrf", ""),
         },
     )
@@ -275,13 +271,14 @@ async def dashboard(
 async def jobs_fragment(
     request: Request,
     tenant_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
-    return await _job_list(request, tenant_id, jobs, reports, templates)
+    return await _job_list(request, tenant_id, jobs, manuscripts, reports, templates)
 
 
 @router.post("/t/{tenant_id}/upload", response_class=HTMLResponse)
@@ -289,7 +286,7 @@ async def upload_via_web(
     request: Request,
     tenant_id: UUID,
     file: UploadFile,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
@@ -325,28 +322,35 @@ async def upload_via_web(
         )
         return _upload_error(request, templates, message=str(exc), status_code=code)
 
-    return await _job_list(request, tenant_id, jobs, reports, templates)
+    return await _job_list(request, tenant_id, jobs, manuscripts, reports, templates)
+
+
+async def _job_list_context(
+    tenant_id: UUID,
+    jobs: AnalysisJobRepository,
+    manuscripts: ManuscriptRepository,
+    reports: ReportRepository,
+) -> dict[str, object]:
+    job_list = await jobs.list_for_tenant(tenant_id)
+    return {
+        "tenant_id": tenant_id,
+        "jobs": job_list,
+        "polling": _any_job_running(j.state for j in job_list),
+        "artifacts": await reports.kinds_by_job([j.id for j in job_list]),
+        "titles": await manuscripts.titles(tenant_id, [j.manuscript_id for j in job_list]),
+    }
 
 
 async def _job_list(
     request: Request,
     tenant_id: UUID,
     jobs: AnalysisJobRepository,
+    manuscripts: ManuscriptRepository,
     reports: ReportRepository,
     templates: Jinja2Templates,
 ) -> HTMLResponse:
-    job_list = await jobs.list_for_tenant(tenant_id)
-    artifacts = await reports.kinds_by_job([j.id for j in job_list])
-    return templates.TemplateResponse(
-        request,
-        "_job_list.html",
-        {
-            "tenant_id": tenant_id,
-            "jobs": job_list,
-            "polling": _any_job_running(j.state for j in job_list),
-            "artifacts": artifacts,
-        },
-    )
+    context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
+    return templates.TemplateResponse(request, "_job_list.html", context)
 
 
 def _any_job_running(states: Iterable[str]) -> bool:
@@ -360,7 +364,7 @@ async def download_artifact(
     tenant_id: UUID,
     job_id: UUID,
     kind: ArtifactKind,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],

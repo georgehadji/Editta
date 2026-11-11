@@ -44,6 +44,13 @@ class FakeManuscriptRepo:
         record.id = manuscript_id
         self._records[(tenant_id, manuscript_id)] = record
 
+    async def titles(self, tenant_id: UUID, manuscript_ids: list[UUID]) -> dict[UUID, str]:
+        return {
+            m: self._records[(tenant_id, m)].title
+            for m in manuscript_ids
+            if (tenant_id, m) in self._records
+        }
+
     async def create(
         self,
         *,

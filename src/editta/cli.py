@@ -64,10 +64,10 @@ def main() -> None:
     add_user.add_argument("--role", choices=("admin", "editor"), default="editor")
 
     grant = subparsers.add_parser(
-        "grant-credits", help="operator: give a tenant credits without a Stripe payment"
+        "grant-credits", help="operator: give (or, negative, take back) credits outside Stripe"
     )
     grant.add_argument("--tenant", required=True, type=UUID)
-    grant.add_argument("--credits", required=True, type=int)
+    grant.add_argument("--credits", required=True, type=int, help="negative after a refund")
 
     args = parser.parse_args()
     commands = {
@@ -153,14 +153,16 @@ def _grant_credits(args: argparse.Namespace) -> None:
             await engine.dispose()
 
     balance = asyncio.run(run())
-    print(f"{args.credits} credits granted to tenant {args.tenant}; balance is now {balance}")
+    print(f"{args.credits:+} credits for tenant {args.tenant}; balance is now {balance}")
 
 
 async def grant_credits(uow: UnitOfWork, tenant_id: UUID, credits: int) -> int:
-    """Credits without a payment (a pilot, a goodwill top-up). Returns the new balance.
+    """Credits without a payment (a pilot, a goodwill top-up), or negative to take them
+    back (a Stripe refund or dispute: those events are not handled). Returns the new
+    balance, which may go below zero: uploads then wait until it is positive again.
     Recorded as a `purchase` with no Stripe reference and a `grant:` key."""
-    if credits < 1:
-        raise EdittaError("--credits must be at least 1")
+    if credits == 0:
+        raise EdittaError("--credits must not be 0")
     async with uow.begin(tenant_id) as session:
         if await TenantRepository(session).get_by_id(tenant_id) is None:
             raise EdittaError(f"tenant {tenant_id} not found")

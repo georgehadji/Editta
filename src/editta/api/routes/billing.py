@@ -15,7 +15,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from editta.adapters.persistence.repositories import CreditLedgerRepository, TenantRepository
 from editta.adapters.persistence.uow import UnitOfWork
-from editta.api.deps import AuthContext, get_billing_service, get_current_auth, get_uow
+from editta.api.deps import get_billing_service, get_current_auth, get_uow
+from editta.services.accounts import AuthenticatedUser
 from editta.services.billing import BillingService, WebhookVerificationError
 
 logger = structlog.get_logger(__name__)
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/billing", tags=["billing"])
 
 @router.get("/checkout")
 async def start_checkout(
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     billing: Annotated[BillingService, Depends(get_billing_service)],
 ) -> RedirectResponse:
     # The Stripe SDK call is synchronous: off the event loop, so a slow Stripe cannot

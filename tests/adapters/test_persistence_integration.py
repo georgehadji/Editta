@@ -329,8 +329,45 @@ async def test_operator_can_grant_credits_without_stripe(
 
     assert await grant_credits(uow, tenant_id, 5) == 5
     assert await grant_credits(uow, tenant_id, 3) == 8  # every grant is its own entry
+    assert await grant_credits(uow, tenant_id, -10) == -2  # a refunded purchase taken back
+    with pytest.raises(EdittaError, match="not be 0"):
+        await grant_credits(uow, tenant_id, 0)
     with pytest.raises(EdittaError, match="not found"):
         await grant_credits(uow, uuid4(), 5)
+
+
+@pytest.mark.asyncio
+async def test_one_tenants_batch_does_not_hold_back_another_tenant(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def _queue(tenant_id: UUID) -> UUID:
+        async with pg_worker_factory() as session:  # one transaction each: distinct now()
+            manuscript = await ManuscriptRepository(session).create(
+                tenant_id=tenant_id,
+                title="m.docx",
+                blob_key="k",
+                sha256="h",
+                retention_until=datetime.now(UTC),
+            )
+            job = await AnalysisJobRepository(session).create(
+                tenant_id=tenant_id, manuscript_id=manuscript.id
+            )
+            await session.commit()
+            return job.id
+
+    async with pg_worker_factory() as session:
+        big = (await TenantRepository(session).create(name="Big")).id
+        small = (await TenantRepository(session).create(name="Small")).id
+        await session.commit()
+    batch = [await _queue(big) for _ in range(3)]
+    late = await _queue(small)  # uploaded after the whole batch
+
+    async with pg_worker_factory() as session:
+        queue = PostgresJobQueue(session)
+        order = [(await queue.claim(worker_id=f"w{i}")) for i in range(4)]
+
+    assert [c.job_id for c in order if c is not None] == [batch[0], late, batch[1], batch[2]]
 
 
 @pytest.mark.asyncio

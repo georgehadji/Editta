@@ -12,6 +12,7 @@ from editta.adapters.llm.client import (
     build_user_content,
 )
 from editta.domain.errors import (
+    LLMError,
     LLMOutputInvalid,
     LLMOutputTruncated,
     LLMRequestRejected,
@@ -142,6 +143,31 @@ async def test_a_request_that_times_out_is_retryable_and_counts_against_the_prov
 
     assert caught.value.retryable
     assert client._breaker._consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_a_vendor_error_reaches_the_job_as_its_status_only() -> None:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    vendor = anthropic.InternalServerError(
+        message=f"overloaded near {GREEK} req_123",
+        response=httpx.Response(529, request=request),
+        body=None,
+    )
+
+    class _Fails:
+        async def __aenter__(self) -> None:
+            raise vendor
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    client = AnthropicLLMClient("key")
+    client._client.messages.stream = lambda **kwargs: _Fails()  # type: ignore[method-assign,assignment]
+
+    with pytest.raises(LLMError) as caught:
+        await _analyze(client)
+
+    assert str(caught.value) == "LLM call failed (InternalServerError, 529)"
 
 
 @pytest.mark.asyncio

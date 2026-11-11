@@ -125,6 +125,15 @@ class ManuscriptRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def titles(self, tenant_id: UUID, manuscript_ids: list[UUID]) -> dict[UUID, str]:
+        """File names for the dashboard's job list, one query for the whole page."""
+        if not manuscript_ids:
+            return {}
+        stmt = select(Manuscript.id, Manuscript.title).where(
+            Manuscript.tenant_id == tenant_id, Manuscript.id.in_(manuscript_ids)
+        )
+        return {row.id: row.title for row in (await self._session.execute(stmt)).all()}
+
     async def list_expired(self, before: datetime) -> list[Manuscript]:
         # Retention sweep is a platform-level job, not tenant-scoped by design (it runs
         # on the BYPASSRLS worker role). Already-purged manuscripts are done.

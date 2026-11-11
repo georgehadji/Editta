@@ -2,7 +2,6 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
@@ -33,17 +32,6 @@ from editta.services.billing import BillingService
 
 SESSION_COOKIE_NAME = "editta_session"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
-
-
-@dataclass(frozen=True)
-class AuthContext:
-    tenant_id: UUID
-    user_id: UUID
-    email: str
-    role: str = "editor"
-
-    def as_user(self) -> AuthenticatedUser:
-        return AuthenticatedUser(self.tenant_id, self.user_id, self.email, self.role)
 
 
 @lru_cache
@@ -91,20 +79,17 @@ def get_account_service(
 async def get_current_auth(
     account_service: Annotated[AccountService, Depends(get_account_service)],
     session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
-) -> AuthContext:
+) -> AuthenticatedUser:
     if session_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not authenticated")
     try:
-        user = await account_service.authenticate_session(session_token)
+        return await account_service.authenticate_session(session_token)
     except InvalidSession as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
-    return AuthContext(
-        tenant_id=user.tenant_id, user_id=user.user_id, email=user.email, role=user.role
-    )
 
 
 async def get_tenant_session(
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     uow: Annotated[UnitOfWork, Depends(get_uow)],
 ) -> AsyncIterator[AsyncSession]:
     """One tenant-scoped transaction per request. Every repository dependency declares

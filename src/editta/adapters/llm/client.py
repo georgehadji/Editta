@@ -80,6 +80,13 @@ def _is_rejection(exc: Exception) -> bool:
     return isinstance(exc, APIStatusError) and exc.status_code in _NON_RETRYABLE_STATUSES
 
 
+def _vendor_summary(exc: Exception) -> str:
+    """Type and HTTP status only. The exception text carries the vendor's JSON body, which
+    lands in job.error on the customer's dashboard (errors.py: no vendor text there)."""
+    status = exc.status_code if isinstance(exc, APIStatusError) else None
+    return type(exc).__name__ if status is None else f"{type(exc).__name__}, {status}"
+
+
 class AnthropicLLMClient:
     """Adapter implementing the LLMClient port. Retries are SDK-native (429/5xx)."""
 
@@ -100,8 +107,8 @@ class AnthropicLLMClient:
             )
         except Exception as exc:
             if _is_rejection(exc):
-                raise LLMRequestRejected(f"token count rejected: {exc}") from exc
-            raise LLMError(f"token count failed: {exc}") from exc
+                raise LLMRequestRejected(f"token count rejected ({_vendor_summary(exc)})") from exc
+            raise LLMError(f"token count failed ({_vendor_summary(exc)})") from exc
         return int(response.input_tokens)
 
     async def analyze(
@@ -140,12 +147,14 @@ class AnthropicLLMClient:
                     message = await stream.get_final_message()
             except Exception as exc:
                 if _is_rejection(exc):
-                    raise LLMRequestRejected(f"LLM request rejected: {exc}") from exc
+                    raise LLMRequestRejected(
+                        f"LLM request rejected ({_vendor_summary(exc)})"
+                    ) from exc
                 if isinstance(exc, APITimeoutError):
                     self._breaker.record_failure()
                     raise LLMTimeout("LLM call timed out") from exc
                 self._breaker.record_failure()
-                raise LLMError(f"LLM call failed: {exc}") from exc
+                raise LLMError(f"LLM call failed ({_vendor_summary(exc)})") from exc
         # The provider answered, so a bad answer is not a provider-health failure.
         self._breaker.record_success()
         usage = message.usage

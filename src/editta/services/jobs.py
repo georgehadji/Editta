@@ -27,7 +27,7 @@ refunding anything; the new owner's outcome is the one that counts.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -67,7 +67,7 @@ from editta.domain.models import (
     PromptParts,
     SynthesisReport,
 )
-from editta.domain.ports import ArtifactExporter, BlobStore, LLMClient
+from editta.domain.ports import ArtifactExporter, BlobStore, LLMClient, single_chunk
 from editta.domain.states import (
     CUSTOMER_FAILURE,
     JobState,
@@ -161,10 +161,6 @@ async def _within[R](seconds: float, phase: str, work: Awaitable[R]) -> R:
         return await asyncio.wait_for(work, timeout=seconds)
     except TimeoutError as exc:
         raise LLMTimeout(f"{phase} took longer than {seconds:.0f}s") from exc
-
-
-async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
-    yield data
 
 
 class JobRunner:
@@ -299,12 +295,13 @@ class JobRunner:
         if synthesis_done:
             synthesis = await self._load_synthesis(job.job_id)
         else:
-            synthesis = await _within(
+            result = await _within(
                 self._synthesis_timeout,
                 "synthesis",
                 run_synthesis(manuscript, pass_results, llm),
             )
-            await self._checkpoint_synthesis(job, synthesis)
+            await self._checkpoint_synthesis(job, result)
+            synthesis = result.output
 
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.EXPORTING)
@@ -331,7 +328,7 @@ class JobRunner:
         ).encode("utf-8")
         # Blob first, then the row that points at it: a crash in between leaves an
         # orphan blob (harmless, overwritten on retry), never a row without its blob.
-        await self._blobs.put(blob_key, _single_chunk(payload))
+        await self._blobs.put(blob_key, single_chunk(payload))
         async with self._uow() as repos:
             await repos.pass_results.upsert(
                 job_id=job.job_id,
@@ -348,19 +345,29 @@ class JobRunner:
                 cache_read_tokens=result.usage.cache_read_tokens,
             )
 
-    async def _checkpoint_synthesis(self, job: ClaimedJob, synthesis: SynthesisReport) -> None:
+    async def _checkpoint_synthesis(
+        self, job: ClaimedJob, result: LLMResult[SynthesisReport]
+    ) -> None:
         """Synthesis is the most expensive call (uncached manuscript); checkpointing it
-        means an export or commit failure never pays for it twice."""
+        means an export or commit failure never pays for it twice. Its cost is counted
+        with the job's like every pass's."""
         blob_key = _pass_checkpoint_key(job.job_id, SYNTHESIS_CHECKPOINT)
-        payload = synthesis.model_dump_json().encode("utf-8")
-        await self._blobs.put(blob_key, _single_chunk(payload))
+        payload = result.output.model_dump_json().encode("utf-8")
+        await self._blobs.put(blob_key, single_chunk(payload))
         async with self._uow() as repos:
             await repos.pass_results.upsert(
                 job_id=job.job_id,
                 pass_name=SYNTHESIS_CHECKPOINT,
                 blob_key=blob_key,
-                model="",
-                usage={},
+                model=result.model,
+                usage=result.usage.model_dump(mode="json"),
+            )
+            await repos.jobs.record_usage(
+                job.tenant_id,
+                job.job_id,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+                cache_read_tokens=result.usage.cache_read_tokens,
             )
 
     async def _load_synthesis(self, job_id: UUID) -> SynthesisReport:
@@ -395,7 +402,7 @@ class JobRunner:
             if data is None:  # does not apply to this job
                 continue
             blob_key = artifact_blob_key(job_id, exporter.kind)
-            await self._blobs.put(blob_key, _single_chunk(data))
+            await self._blobs.put(blob_key, single_chunk(data))
             stored.append((exporter.kind, blob_key))
         return stored
 

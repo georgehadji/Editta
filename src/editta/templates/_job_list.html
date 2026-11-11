@@ -3,7 +3,7 @@
   <tbody>
     {% for job in jobs %}
     <tr>
-      <td>{{ job.manuscript_id }}</td>
+      <td>{{ titles.get(job.manuscript_id, "manuscript") }}</td>
       <td class="state">{{ job.state }}{% if job.error %} — <span class="error-text">{{ job.error }}</span>{% endif %}</td>
       <td>
         {% if job.state == "completed" %}

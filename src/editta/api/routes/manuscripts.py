@@ -14,7 +14,6 @@ from editta.adapters.persistence.repositories import (
     TenantRepository,
 )
 from editta.api.deps import (
-    AuthContext,
     get_audit_repo,
     get_blob_store,
     get_current_auth,
@@ -36,6 +35,7 @@ from editta.config import Settings
 from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
 from editta.domain.ports import BlobStore
+from editta.services.accounts import AuthenticatedUser
 from editta.services.reports import report_download
 from editta.services.uploads import submit_manuscript
 
@@ -45,7 +45,7 @@ router = APIRouter(prefix="/manuscripts", tags=["manuscripts"], dependencies=[De
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def upload_manuscript(
     file: UploadFile,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
@@ -81,7 +81,7 @@ async def upload_manuscript(
 @router.get("/jobs/{job_id}")
 async def get_job_status(
     job_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
 ) -> Envelope[JobStatusResponse]:
     job = await jobs.get_by_id(auth.tenant_id, job_id)
@@ -94,7 +94,7 @@ async def get_job_status(
 async def get_artifact_download_url(
     job_id: UUID,
     kind: ArtifactKind,  # anything but a known kind is a 422 before any lookup
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],

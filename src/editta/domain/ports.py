@@ -57,6 +57,11 @@ class BlobStore(Protocol):
     ) -> str: ...
 
 
+async def single_chunk(data: bytes) -> AsyncIterator[bytes]:
+    """Bytes already in memory, in the shape `BlobStore.put` takes."""
+    yield data
+
+
 class ArtifactExporter(Protocol):
     """Builds one output file of a job. Sync and CPU-bound: the runner calls it in a
     worker thread under a timeout, because some exporters walk attacker-shaped files."""

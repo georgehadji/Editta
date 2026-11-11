@@ -3,6 +3,7 @@ from fastapi import HTTPException
 
 from editta.adapters.email.console import ConsoleEmailSender
 from editta.api import deps
+from editta.services.accounts import AuthenticatedUser
 
 
 @pytest.fixture(autouse=True)
@@ -53,8 +54,8 @@ def test_a_failed_commit_is_an_error_response_not_a_success_already_sent() -> No
 
     tenant_id = uuid4()
     app.dependency_overrides[deps.get_uow] = FailingCommitUow
-    app.dependency_overrides[deps.get_current_auth] = lambda: deps.AuthContext(
-        tenant_id=tenant_id, user_id=uuid4(), email="e@example.com"
+    app.dependency_overrides[deps.get_current_auth] = lambda: AuthenticatedUser(
+        tenant_id=tenant_id, user_id=uuid4(), email="e@example.com", role="editor"
     )
     try:
         with TestClient(app, raise_server_exceptions=False) as client:

@@ -49,7 +49,8 @@ editta grant-credits --tenant <tenant-id> --credits 5   # a pilot, or without St
 ```
 
 A new tenant has no credits: each upload needs one. They arrive with a Stripe purchase,
-or from `grant-credits`.
+or from `grant-credits`. Stripe refunds and disputes are not handled: after one, take the
+credits back by hand with a negative number (`--credits -10`).
 
 Outside `EDITTA_ENVIRONMENT=development`, SMTP must be configured: sign-in links are
 only ever emailed, never logged or shown on the page.
@@ -67,6 +68,12 @@ Credits are granted only once the payment is settled. A checkout paid by a delay
 
 ## Behind a reverse proxy
 
+- **Client addresses.** Visitors who are not signed in are rate-limited per IP (sign-in
+  links: 10 a minute). uvicorn believes `X-Forwarded-For` only from `127.0.0.1`, so behind
+  a proxy on another host or container every visitor shares the proxy's address and one
+  limit. Set `FORWARDED_ALLOW_IPS` to the proxy's address on the API container
+  (e.g. `FORWARDED_ALLOW_IPS=172.18.0.2`). Never `*` while the app is reachable without
+  the proxy: anyone could then pick their own address.
 - **Request size.** The app refuses bodies over 26 MB with 413. Set the same cap at the
   proxy so oversized uploads never reach it (nginx: `client_max_body_size 26m;`).
 - **Access logs.** Sign-in links carry a live token (`/t/<tenant>/auth/click?token=…`,
@@ -141,6 +148,10 @@ The API answers `GET /healthz` (the process is up; the container `HEALTHCHECK` u
 `GET /readyz` (200 if the database answers, 503 if not; point the load balancer at it).
 Both are unauthenticated, exempt from rate limits and return no detail. The image runs as
 a non-root user (uid 10001).
+
+Before starting a new version, migrate the database from the same image (it carries the
+migrations): `docker run --rm --env-file .env <image> alembic upgrade head`. New code
+against an old schema fails every job.
 
 ## Scaling workers
 

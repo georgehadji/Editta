@@ -15,12 +15,11 @@ class JobState(StrEnum):
     SYNTHESIZING = "synthesizing"
     EXPORTING = "exporting"
     COMPLETED = "completed"
-    FAILED = "failed"
     DEAD = "dead"
-    CANCELLED = "cancelled"
 
 
-TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD, JobState.CANCELLED})
+# The same two names end the queue's claim query (adapters/queue/postgres.py).
+TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD})
 
 # `failure_kind` of a job that died because of what the customer uploaded (an unreadable
 # file, a manuscript too long or too costly). It is refunded and needs no operator.
