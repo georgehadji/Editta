@@ -64,5 +64,22 @@ def load_settings() -> Settings:
     return Settings()
 
 
+class _RateLimitSettings(BaseSettings):
+    """Read on its own because the rate limiter is built when the API module is imported,
+    long before (and without needing) the full `Settings`, whose required fields would
+    fail every import that has no database configured."""
+
+    model_config = SettingsConfigDict(env_prefix="EDITTA_", env_file=".env", extra="ignore")
+
+    # Unset: counters live in each API process, so N processes allow N times the limit.
+    # A shared store ("redis://host:6379") makes the limits hold across processes; it
+    # needs the `redis` extra (pip install 'editta[redis]').
+    rate_limit_storage_uri: str | None = None
+
+
+def rate_limit_storage_uri() -> str | None:
+    return _RateLimitSettings().rate_limit_storage_uri
+
+
 def worker_database_url(settings: Settings) -> str:
     return settings.worker_database_url or settings.database_url

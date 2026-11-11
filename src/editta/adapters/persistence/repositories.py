@@ -207,13 +207,20 @@ class AnalysisJobRepository:
         output_tokens: int,
         cache_read_tokens: int,
     ) -> None:
-        job = await self.get_by_id(tenant_id, job_id)
-        if job is None:
+        """Adds to the job's token counters in the database, not in Python: passes on
+        different models checkpoint concurrently in separate transactions, and a read,
+        add, write-back lets one overwrite the other."""
+        result = await self._session.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.tenant_id == tenant_id, AnalysisJob.id == job_id)
+            .values(
+                cost_input_tokens=AnalysisJob.cost_input_tokens + input_tokens,
+                cost_output_tokens=AnalysisJob.cost_output_tokens + output_tokens,
+                cache_read_tokens=AnalysisJob.cache_read_tokens + cache_read_tokens,
+            )
+        )
+        if result.rowcount != 1:  # type: ignore[attr-defined]
             raise LookupError(f"job {job_id} not found for tenant {tenant_id}")
-        job.cost_input_tokens += input_tokens
-        job.cost_output_tokens += output_tokens
-        job.cache_read_tokens += cache_read_tokens
-        await self._session.flush()
 
 
 class PassResultRepository:

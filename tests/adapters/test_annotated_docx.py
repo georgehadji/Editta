@@ -370,6 +370,19 @@ def test_a_quote_inside_a_tracked_insertion_is_left_unplaced() -> None:
     assert AnnotatedManuscriptExporter().build(_context(source, [_finding("μια προσθήκη")])) is None
 
 
+def test_a_run_carrying_word_s_page_break_note_can_still_be_cut() -> None:
+    marked = f"<w:r {_W}><w:lastRenderedPageBreak/><w:t>Έχει ένα σφάλμα εδώ.</w:t></w:r>"
+    source = _paragraph_doc(marked)
+
+    out = AnnotatedManuscriptExporter().build(_context(source, [_finding("ένα σφάλμα")]))
+
+    assert out is not None
+    paragraph = docx.Document(io.BytesIO(out)).paragraphs[0]._p
+    assert _commented_text(paragraph) == ["ένα σφάλμα"]
+    assert _all_text(out) == _all_text(source)
+    assert len(paragraph.findall(f".//{qn('w:lastRenderedPageBreak')}")) == 1
+
+
 def test_a_quote_in_a_table_cell_is_commented_in_that_cell() -> None:
     document = docx.Document()
     document.add_paragraph("Πρώτη παράγραφος.")

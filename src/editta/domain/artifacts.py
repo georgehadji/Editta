@@ -13,8 +13,6 @@ from uuid import UUID
 
 from editta.domain.models import ManuscriptText, PassResult, SynthesisReport
 
-DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
 _SOURCE_EXTENSION = re.compile(r"\.(docx|pdf)$", re.IGNORECASE)
 
 
@@ -26,22 +24,15 @@ class ArtifactKind(StrEnum):
 @dataclass(frozen=True, slots=True)
 class _ArtifactSpec:
     extension: str
-    content_type: str
     filename_suffix: str  # appended to the manuscript's own name in the download
 
 
 _SPECS: Mapping[ArtifactKind, _ArtifactSpec] = MappingProxyType(
     {
-        ArtifactKind.REPORT: _ArtifactSpec("docx", DOCX_CONTENT_TYPE, "-editta-report"),
-        ArtifactKind.ANNOTATED_MANUSCRIPT: _ArtifactSpec(
-            "docx", DOCX_CONTENT_TYPE, "-editta-comments"
-        ),
+        ArtifactKind.REPORT: _ArtifactSpec("docx", "-editta-report"),
+        ArtifactKind.ANNOTATED_MANUSCRIPT: _ArtifactSpec("docx", "-editta-comments"),
     }
 )
-
-
-def artifact_content_type(kind: ArtifactKind) -> str:
-    return _SPECS[kind].content_type
 
 
 def artifact_blob_key(job_id: UUID, kind: ArtifactKind) -> str:

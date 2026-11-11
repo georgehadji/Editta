@@ -70,6 +70,19 @@ Credits are granted only once the payment is settled. A checkout paid by a delay
   must not record query strings for that path: log `$uri` instead of `$request`, or
   `access_log off;` on that location.
 
+## Several API processes
+
+Rate-limit counters live in each process by default, so N processes allow N times the
+limit (the sign-in limit of 10 emails a minute becomes 10 × N). With more than one process,
+point them at a shared store and install the client:
+
+```bash
+pip install 'editta[redis]'
+EDITTA_RATE_LIMIT_STORAGE_URI=redis://cache:6379
+```
+
+If the store is unreachable the limits lapse until it is back; requests are not failed.
+
 ## Running the worker and the retention sweep
 
 The web app only queues work. Two more processes must run, from the same environment as

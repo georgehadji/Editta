@@ -4,10 +4,8 @@ import pytest
 
 from editta.adapters.storage.s3 import attachment_disposition
 from editta.domain.artifacts import (
-    DOCX_CONTENT_TYPE,
     ArtifactKind,
     artifact_blob_key,
-    artifact_content_type,
     artifact_filename,
 )
 
@@ -16,7 +14,6 @@ def test_blob_key_is_built_from_the_job_and_the_kind_only() -> None:
     job_id = uuid4()
 
     assert artifact_blob_key(job_id, ArtifactKind.REPORT) == f"jobs/{job_id}/report.docx"
-    assert artifact_content_type(ArtifactKind.REPORT) == DOCX_CONTENT_TYPE
 
 
 def test_the_commented_manuscript_has_its_own_key_and_download_name() -> None:
@@ -24,7 +21,6 @@ def test_the_commented_manuscript_has_its_own_key_and_download_name() -> None:
     kind = ArtifactKind.ANNOTATED_MANUSCRIPT
 
     assert artifact_blob_key(job_id, kind) == f"jobs/{job_id}/annotated_manuscript.docx"
-    assert artifact_content_type(kind) == DOCX_CONTENT_TYPE
     assert artifact_filename("Το βιβλίο.docx", kind) == "Το βιβλίο-editta-comments.docx"
 
 

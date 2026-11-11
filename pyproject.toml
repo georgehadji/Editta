@@ -33,6 +33,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Shared rate-limit counters across API processes (EDITTA_RATE_LIMIT_STORAGE_URI=redis://...).
+redis = ["redis>=5.0"]
 dev = [
   "ruff>=0.8",
   "mypy>=1.13",

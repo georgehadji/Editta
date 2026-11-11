@@ -98,9 +98,14 @@ def _segments(paragraph: Paragraph) -> list[_Segment] | None:
     return segments if position == len(paragraph_text(paragraph)) else None
 
 
+# Not content: formatting, and Word's note of where a page last broke (it re-writes it on
+# the next save, and every run that crosses a page boundary carries one).
+_NOT_CONTENT = (qn("w:rPr"), qn("w:lastRenderedPageBreak"))
+
+
 def _only_text(run: Run) -> bool:
     """A run of one `w:t` and formatting: the only kind this cuts in two."""
-    kids = [child for child in run._r if child.tag != qn("w:rPr")]
+    kids = [child for child in run._r if child.tag not in _NOT_CONTENT]
     return len(kids) == 1 and kids[0].tag == qn("w:t")
 
 
@@ -112,6 +117,8 @@ def _split_at(paragraph: Paragraph, offset: int) -> None:
             text = text_element.text or ""
             cut = offset - segment.start
             right = copy.deepcopy(element)
+            for marker in right.findall(qn("w:lastRenderedPageBreak")):
+                right.remove(marker)  # the break belongs before the left half's text only
             element.addnext(right)
             right_text = right.find(qn("w:t"))
             text_element.text, right_text.text = text[:cut], text[cut:]

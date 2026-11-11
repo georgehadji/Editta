@@ -1,4 +1,4 @@
-<table id="job-list" hx-get="/t/{{ tenant_id }}/jobs-fragment" hx-trigger="every 3s" hx-swap="outerHTML">
+<table id="job-list"{% if polling %} hx-get="/t/{{ tenant_id }}/jobs-fragment" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
   <thead><tr><th>Manuscript</th><th>Status</th><th></th></tr></thead>
   <tbody>
     {% for job in jobs %}

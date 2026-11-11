@@ -773,3 +773,27 @@ async def test_inviting_different_emails_still_creates_separate_users(
         a = await repo.create(tenant_id=tenant_id, email="a@example.com", role="admin")
         b = await repo.create(tenant_id=tenant_id, email="b@example.com")
         assert a.id != b.id and (a.role, b.role) == ("admin", "editor")
+
+
+@pytest.mark.asyncio
+async def test_token_usage_recorded_concurrently_adds_up(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Passes on different models checkpoint at the same time, each in its own
+    transaction. A read-add-write lost updates; the counters must be exact."""
+    tenant_id, _, job_id = await _seed_job(pg_worker_factory)
+    uow = UnitOfWork(pg_session_factory)
+
+    async def _record() -> None:
+        async with uow.begin(tenant_id) as session:
+            await AnalysisJobRepository(session).record_usage(
+                tenant_id, job_id, input_tokens=1, output_tokens=2, cache_read_tokens=3
+            )
+
+    await asyncio.gather(*(_record() for _ in range(20)))
+
+    async with uow.begin(tenant_id) as session:
+        job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
+    assert job is not None
+    assert (job.cost_input_tokens, job.cost_output_tokens, job.cache_read_tokens) == (20, 40, 60)
