@@ -337,9 +337,6 @@ class CreditLedgerRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    async def has_entry(self, idempotency_key: str) -> bool:
-        return await self.entry_delta(idempotency_key) is not None
-
     async def entry_delta(self, idempotency_key: str) -> int | None:
         stmt = select(CreditLedger.delta).where(CreditLedger.idempotency_key == idempotency_key)
         return (await self._session.execute(stmt)).scalar_one_or_none()

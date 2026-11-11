@@ -288,19 +288,19 @@ def _rendered_job_list(*, state: str, kinds: set[str]) -> str:
 
 def test_a_finished_job_with_comments_offers_the_commented_file() -> None:
     html = _rendered_job_list(state="completed", kinds={"report", "annotated_manuscript"})
-    assert "/download" in html
+    assert "/artifacts/report" in html
     assert "/artifacts/annotated_manuscript" in html
 
 
 def test_a_finished_job_without_comments_offers_only_the_report() -> None:
     html = _rendered_job_list(state="completed", kinds={"report"})
-    assert "/download" in html
+    assert "/artifacts/report" in html
     assert "annotated_manuscript" not in html
 
 
 def test_an_unfinished_job_offers_no_download() -> None:
     html = _rendered_job_list(state="analyzing", kinds=set())
-    assert "/download" not in html
+    assert "/artifacts/report" not in html
     assert "annotated_manuscript" not in html
 
 

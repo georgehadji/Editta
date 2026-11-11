@@ -17,13 +17,14 @@ from pypdf.errors import PdfReadError
 
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
+from editta.domain.xmltext import strip_xml_illegal
 
 MAX_PDF_PAGES = 2_000
 MAX_EXTRACTED_CHARS = 5_000_000  # ~1M words: far past any essay/book manuscript
 
-# Characters XML 1.0 forbids. Broken font maps put them in extracted text; they would
-# otherwise reach the prompts, be quoted back, and make the DOCX export raise.
-_XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+# Error messages name the failure only, never the exception text: pypdf's read errors
+# quote the bytes around the bad object, and in an uncompressed PDF that is manuscript
+# text (it would land in job.error and the logs).
 
 _INLINE_WHITESPACE = re.compile(r"[ \t ]+")
 
@@ -33,14 +34,14 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
     try:
         reader = PdfReader(io.BytesIO(data), strict=False)
     except (PdfReadError, ValueError, OSError) as exc:
-        raise ParseError(f"failed to parse .pdf: {exc}") from exc
+        raise ParseError("failed to parse .pdf") from exc
 
     if reader.is_encrypted:
         raise ParseError("encrypted or password-protected PDFs are not accepted")
     try:
         page_count = len(reader.pages)
     except Exception as exc:
-        raise ParseError(f"failed to read .pdf page tree: {exc}") from exc
+        raise ParseError("failed to read .pdf page tree") from exc
     if page_count > MAX_PDF_PAGES:
         raise ParseError(f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}")
 
@@ -50,9 +51,11 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
         try:
             page_text = page.extract_text() or ""
         except Exception as exc:
-            raise ParseError(f"failed to extract text from PDF page {index + 1}: {exc}") from exc
+            raise ParseError(f"failed to extract text from PDF page {index + 1}") from exc
         for raw_line in page_text.splitlines():
-            line = _INLINE_WHITESPACE.sub(" ", _XML_FORBIDDEN.sub("", raw_line)).strip()
+            # Broken font maps put XML-forbidden characters in extracted text; they would
+            # reach the prompts, be quoted back, and make the DOCX export raise.
+            line = _INLINE_WHITESPACE.sub(" ", strip_xml_illegal(raw_line)).strip()
             if not line:
                 continue
             total_chars += len(line)

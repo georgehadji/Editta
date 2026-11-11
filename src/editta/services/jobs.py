@@ -30,7 +30,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 import structlog
@@ -285,7 +285,14 @@ class JobRunner:
             "analysis",
             run_passes(missing, manuscript, llm, on_pass_completed=checkpoint),
         )
-        pass_results = [await self._load_checkpoint(job.job_id, p.name) for p in ANALYSIS_PASSES]
+        async with self._uow() as repos:
+            saved = {
+                r.pass_name: (r.blob_key, r.usage, r.model)
+                for r in await repos.pass_results.list_for_job(job.job_id)
+            }
+        pass_results = [
+            await self._load_checkpoint(p.name, *saved[p.name]) for p in ANALYSIS_PASSES
+        ]
 
         async with self._uow() as repos:
             await self._set_state(repos, job, JobState.SYNTHESIZING)
@@ -361,11 +368,9 @@ class JobRunner:
         raw = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
         return SynthesisReport.model_validate_json(raw)
 
-    async def _load_checkpoint(self, job_id: UUID, pass_name: str) -> PassResult:
-        async with self._uow() as repos:
-            records = await repos.pass_results.list_for_job(job_id)
-            record = next(r for r in records if r.pass_name == pass_name)
-            blob_key, usage, model = record.blob_key, record.usage, record.model
+    async def _load_checkpoint(
+        self, pass_name: str, blob_key: str, usage: dict[str, Any], model: str
+    ) -> PassResult:
         raw = b"".join([chunk async for chunk in self._blobs.get(blob_key)])
         findings = [Finding.model_validate(f) for f in json.loads(raw)]
         return PassResult(

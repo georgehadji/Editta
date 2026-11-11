@@ -7,7 +7,7 @@
       <td class="state">{{ job.state }}{% if job.error %} — <span class="error-text">{{ job.error }}</span>{% endif %}</td>
       <td>
         {% if job.state == "completed" %}
-          <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/download">download report</a>
+          <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/artifacts/report">download report</a>
           {% if "annotated_manuscript" in artifacts.get(job.id, ()) %}
           · <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/artifacts/annotated_manuscript">download with comments (.docx)</a>
           {% endif %}

@@ -119,7 +119,7 @@ async def test_upload_reserves_the_credit_under_the_tenant_lock() -> None:
     submitted = await deps.submit(_docx(), "essay.docx")
 
     assert deps.tenants.locked == [TENANT]
-    assert await deps.ledger.has_entry(reservation_key(submitted.job_id))  # type: ignore[attr-defined]
+    assert await deps.ledger.entry_delta(reservation_key(submitted.job_id)) is not None  # type: ignore[attr-defined]
     assert await deps.ledger.balance(TENANT) == 0
     with pytest.raises(InsufficientCredits):  # the last credit is spent
         await deps.submit(_docx(), "essay.docx")

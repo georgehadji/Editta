@@ -383,20 +383,3 @@ async def download_artifact(
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return RedirectResponse(download.url)
-
-
-@router.get("/t/{tenant_id}/jobs/{job_id}/download")
-async def download_report(
-    tenant_id: UUID,
-    job_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
-    jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
-    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
-    reports: Annotated[ReportRepository, Depends(get_report_repo)],
-    audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
-    blobs: Annotated[BlobStore, Depends(get_blob_store)],
-) -> RedirectResponse:
-    """Kept for the links already on the job list."""
-    return await download_artifact(
-        tenant_id, job_id, ArtifactKind.REPORT, auth, jobs, manuscripts, reports, audit, blobs
-    )

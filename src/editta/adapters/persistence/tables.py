@@ -29,9 +29,6 @@ class Tenant(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "tenants"
 
     name: Mapped[str]
-    plan: Mapped[str] = mapped_column(default="trial")
-    credit_balance_cache: Mapped[int] = mapped_column(default=0)
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
 
 
 class User(UUIDPKMixin, TimestampMixin, Base):
@@ -56,7 +53,6 @@ class Manuscript(UUIDPKMixin, TimestampMixin, Base):
     title: Mapped[str]
     blob_key: Mapped[str]
     sha256: Mapped[str]
-    token_count: Mapped[int | None] = mapped_column(default=None)
     status: Mapped[str] = mapped_column(default="uploaded")
     retention_until: Mapped[datetime]
 
@@ -101,7 +97,6 @@ class Report(UUIDPKMixin, TimestampMixin, Base):
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_jobs.id"), index=True)
     kind: Mapped[str] = mapped_column(server_default="report")
     blob_key: Mapped[str]
-    summary_blob_key: Mapped[str | None] = mapped_column(default=None)
 
 
 class CreditLedger(UUIDPKMixin, Base):

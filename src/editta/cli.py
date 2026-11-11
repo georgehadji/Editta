@@ -3,6 +3,7 @@
   editta analyze manuscript.(docx|pdf) -o report.docx   run the pipeline locally
   editta create-tenant --name NAME --admin-email EMAIL  provision a tenant + first admin
   editta add-user --tenant ID --email EMAIL [--role R]  operator: add/restore a user
+  editta grant-credits --tenant ID --credits N          operator: credits without Stripe
 
 Access is invite-only (services/accounts.py): nobody can sign in to a tenant until an
 account exists, so a new tenant's first admin is created here, by an operator, never
@@ -16,13 +17,17 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from editta.adapters.export.docx_builder import ReportDocxBuilder
 from editta.adapters.llm import build_llm_client
-from editta.adapters.persistence.repositories import TenantRepository, UserRepository
+from editta.adapters.persistence.repositories import (
+    CreditLedgerRepository,
+    TenantRepository,
+    UserRepository,
+)
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.domain.errors import EdittaError
 from editta.services.accounts import AccountService
@@ -58,11 +63,18 @@ def main() -> None:
     add_user.add_argument("--email", required=True)
     add_user.add_argument("--role", choices=("admin", "editor"), default="editor")
 
+    grant = subparsers.add_parser(
+        "grant-credits", help="operator: give a tenant credits without a Stripe payment"
+    )
+    grant.add_argument("--tenant", required=True, type=UUID)
+    grant.add_argument("--credits", required=True, type=int)
+
     args = parser.parse_args()
     commands = {
         "analyze": _analyze,
         "create-tenant": _create_tenant,
         "add-user": _add_user,
+        "grant-credits": _grant_credits,
     }
     try:
         commands[args.command](args)
@@ -129,6 +141,37 @@ def _add_user(args: argparse.Namespace) -> None:
         )
     )
     print(f"{user.email} added to tenant {user.tenant_id} as {user.role}")
+
+
+def _grant_credits(args: argparse.Namespace) -> None:
+    async def run() -> int:
+        engine = create_async_engine(_require_env("EDITTA_DATABASE_URL"))
+        try:
+            uow = UnitOfWork(async_sessionmaker(engine, expire_on_commit=False))
+            return await grant_credits(uow, args.tenant, args.credits)
+        finally:
+            await engine.dispose()
+
+    balance = asyncio.run(run())
+    print(f"{args.credits} credits granted to tenant {args.tenant}; balance is now {balance}")
+
+
+async def grant_credits(uow: UnitOfWork, tenant_id: UUID, credits: int) -> int:
+    """Credits without a payment (a pilot, a goodwill top-up). Returns the new balance.
+    Recorded as a `purchase` with no Stripe reference and a `grant:` key."""
+    if credits < 1:
+        raise EdittaError("--credits must be at least 1")
+    async with uow.begin(tenant_id) as session:
+        if await TenantRepository(session).get_by_id(tenant_id) is None:
+            raise EdittaError(f"tenant {tenant_id} not found")
+        ledger = CreditLedgerRepository(session)
+        await ledger.append_once(
+            tenant_id=tenant_id,
+            delta=credits,
+            reason="purchase",
+            idempotency_key=f"grant:{uuid4()}",
+        )
+        return await ledger.balance(tenant_id)
 
 
 async def _with_accounts[R](action: Callable[[AccountService], Awaitable[R]]) -> R:

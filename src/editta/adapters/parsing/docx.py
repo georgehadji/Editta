@@ -54,7 +54,8 @@ def extract_docx(data: bytes, filename: str) -> ManuscriptText:
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as exc:
-        raise ParseError(f"failed to parse .docx: {exc}") from exc
+        # Not the exception text: parser errors can quote the document.
+        raise ParseError("failed to parse .docx") from exc
 
     lines: list[str] = []
     sections: list[str] = []

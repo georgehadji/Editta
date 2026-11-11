@@ -238,3 +238,20 @@ def test_pdf_control_character_filter_keeps_ordinary_whitespace_and_text() -> No
     text = parse_manuscript(text_pdf([["one\ttwo"], ["three"]]), "essay.pdf").text
 
     assert text == "one two\nthree"
+
+
+def test_a_parser_error_message_never_carries_the_parsers_own_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pypdf's read errors quote the bytes around the bad object, i.e. manuscript text;
+    the message lands in job.error and the logs."""
+
+    def quoting_reader(*_args: object, **_kwargs: object) -> None:
+        raise pdf_module.PdfReadError("Invalid object near b'secret manuscript words'")
+
+    monkeypatch.setattr(pdf_module, "PdfReader", quoting_reader)
+
+    with pytest.raises(ParseError) as raised:
+        parse_manuscript(text_pdf([["anything"]]), "a.pdf")
+
+    assert "secret" not in str(raised.value)

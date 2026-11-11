@@ -255,9 +255,6 @@ class FakeLedgerRepo:
         self._deltas[key] = -credits
         self.entries.append({"tenant_id": tenant_id, "delta": -credits, "reason": "job"})
 
-    async def has_entry(self, idempotency_key: str) -> bool:
-        return idempotency_key in self._seen_keys
-
     async def entry_delta(self, idempotency_key: str) -> int | None:
         return self._deltas.get(idempotency_key)
 

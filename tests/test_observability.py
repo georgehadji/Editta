@@ -57,6 +57,27 @@ def test_bound_ids_appear_on_lines_written_inside_the_block_only(
     assert "request_id" not in outside
 
 
+def test_a_logged_exception_says_what_failed_and_where_but_not_its_message(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("worker")
+
+    try:
+        raise ValueError("Ἡ ψυχὴ τοῦ Σωκράτους")  # an exception that quotes the manuscript
+    except ValueError:
+        structlog.get_logger().exception("job.attempt_crashed")
+
+    (line,) = _lines(capsys)
+    assert line["error_type"] == "ValueError"
+    assert line["error_at"].endswith(f"test_observability.py:{_raise_line()}")
+    assert "exc_info" not in line and "Σωκράτους" not in json.dumps(line, ensure_ascii=False)
+
+
+def _raise_line() -> int:
+    source = Path(__file__).read_text("utf-8").splitlines()
+    return next(i for i, text in enumerate(source, 1) if 'raise ValueError("Ἡ' in text)
+
+
 def test_structlog_is_configured_in_exactly_one_place() -> None:
     """A second setup could leave a process without the scrub, as the worker once was."""
     src = Path(__file__).resolve().parents[1] / "src"

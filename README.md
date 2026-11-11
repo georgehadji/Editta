@@ -45,7 +45,11 @@ command line; the admin then invites others (`POST /auth/invite`):
 ```bash
 editta create-tenant --name "Εκδόσεις Πόλις" --admin-email owner@polis.gr
 editta add-user --tenant <tenant-id> --email editor@polis.gr --role editor   # operator use
+editta grant-credits --tenant <tenant-id> --credits 5   # a pilot, or without Stripe
 ```
+
+A new tenant has no credits: each upload needs one. They arrive with a Stripe purchase,
+or from `grant-credits`.
 
 Outside `EDITTA_ENVIRONMENT=development`, SMTP must be configured: sign-in links are
 only ever emailed, never logged or shown on the page.
