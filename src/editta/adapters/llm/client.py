@@ -9,12 +9,19 @@
 import asyncio
 from typing import Final, Literal, TypeVar, cast, get_args
 
-from anthropic import APIStatusError, AsyncAnthropic, transform_schema
+from anthropic import APIStatusError, APITimeoutError, AsyncAnthropic, transform_schema
 from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
 from pydantic import BaseModel, ValidationError
 
+from editta.adapters.llm.limits import REQUEST_TIMEOUT_SECONDS
 from editta.adapters.llm.resilience import CircuitBreaker, TokenBucket
-from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, LLMRequestRejected
+from editta.domain.errors import (
+    LLMError,
+    LLMOutputInvalid,
+    LLMOutputTruncated,
+    LLMRequestRejected,
+    LLMTimeout,
+)
 from editta.domain.models import CachePolicy, LLMResult, LLMUsage, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
@@ -79,7 +86,7 @@ class AnthropicLLMClient:
     def __init__(
         self, api_key: str, *, max_concurrency: int = 4, rate_limit_per_minute: int = 50
     ) -> None:
-        self._client = AsyncAnthropic(api_key=api_key)
+        self._client = AsyncAnthropic(api_key=api_key, timeout=REQUEST_TIMEOUT_SECONDS)
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._breaker = CircuitBreaker()
         self._bucket = TokenBucket(
@@ -134,6 +141,9 @@ class AnthropicLLMClient:
             except Exception as exc:
                 if _is_rejection(exc):
                     raise LLMRequestRejected(f"LLM request rejected: {exc}") from exc
+                if isinstance(exc, APITimeoutError):
+                    self._breaker.record_failure()
+                    raise LLMTimeout("LLM call timed out") from exc
                 self._breaker.record_failure()
                 raise LLMError(f"LLM call failed: {exc}") from exc
         # The provider answered, so a bad answer is not a provider-health failure.

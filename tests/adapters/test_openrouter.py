@@ -13,7 +13,13 @@ from editta.adapters.llm.openrouter import (
     served_model,
 )
 from editta.domain.budget import GEMINI_ARGON, GPT_SOL, HAIKU, OPUS, SONNET
-from editta.domain.errors import LLMError, LLMOutputInvalid, LLMOutputTruncated, LLMRequestRejected
+from editta.domain.errors import (
+    LLMError,
+    LLMOutputInvalid,
+    LLMOutputTruncated,
+    LLMRequestRejected,
+    LLMTimeout,
+)
 from editta.domain.models import CachePolicy, Finding, PassFindings, PromptParts, Severity
 
 PARTS = PromptParts(system="sys", manuscript_block="manuscript body", instructions="do X")
@@ -271,6 +277,31 @@ async def test_always_garbled_stream_is_a_retryable_llm_error_without_the_garbag
 
 async def _noop() -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_keeps_timing_out_ends_as_a_retryable_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("editta.adapters.llm.openrouter.asyncio.sleep", lambda _: _noop())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(LLMTimeout) as caught:
+        await _client(handler).analyze(
+            PARTS, PassFindings, cache=CachePolicy.NONE, effort="high", model=OPUS
+        )
+
+    assert caught.value.retryable
+
+
+def test_the_per_minute_share_reaches_both_clients() -> None:
+    both = build_llm_client(anthropic_api_key="a", openrouter_api_key="o", rate_limit_per_minute=12)
+    assert isinstance(both, OpenRouterLLMClient)
+    assert isinstance(both._token_counter, AnthropicLLMClient)
+    assert both._bucket._capacity == 12
+    assert both._token_counter._bucket._capacity == 12
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,8 @@ def test_load_settings_reads_env() -> None:
     assert settings.job_cost_credits == 1
     assert settings.max_llm_concurrency == 4
     assert settings.job_cost_ceiling_usd == 6.0
+    assert settings.llm_requests_per_minute == 50
+    assert (settings.analysis_timeout_seconds, settings.synthesis_timeout_seconds) == (1800, 900)
     assert settings.manuscript_retention_days == 30
     assert settings.database_url.startswith("postgresql+asyncpg://")
 

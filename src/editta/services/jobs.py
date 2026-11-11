@@ -48,7 +48,7 @@ from editta.adapters.persistence.repositories import (
 )
 from editta.domain.artifacts import ArtifactKind, ExportContext, artifact_blob_key
 from editta.domain.credits import refund_key, reservation_key
-from editta.domain.errors import EdittaError, LeaseLost, LLMError, ParseError
+from editta.domain.errors import EdittaError, LeaseLost, LLMError, LLMTimeout, ParseError
 from editta.domain.models import (
     CachePolicy,
     ClaimedJob,
@@ -121,6 +121,10 @@ SYNTHESIS_CHECKPOINT = "synthesis"
 PARSE_TIMEOUT_SECONDS = 120.0
 # Exporters build files from the model's output and, later, re-open the author's own file.
 EXPORT_TIMEOUT_SECONDS = 120.0
+# The model phases. Each request has its own limit in the adapter; these bound the whole
+# phase, so a provider that keeps answering slowly cannot hold the lease for hours.
+ANALYSIS_TIMEOUT_SECONDS = 1800.0
+SYNTHESIS_TIMEOUT_SECONDS = 900.0
 DEFAULT_EXPORTERS: tuple[ArtifactExporter, ...] = (
     ReportExporter(),
     AnnotatedManuscriptExporter(),
@@ -140,6 +144,13 @@ def _error_message(exc: BaseException) -> str:
     return f"internal error ({type(exc).__name__})"
 
 
+async def _within[R](seconds: float, phase: str, work: Awaitable[R]) -> R:
+    try:
+        return await asyncio.wait_for(work, timeout=seconds)
+    except TimeoutError as exc:
+        raise LLMTimeout(f"{phase} took longer than {seconds:.0f}s") from exc
+
+
 async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
     yield data
 
@@ -155,14 +166,25 @@ class JobRunner:
         llm: LLMClient,
         cost_ceiling_usd: float,
         exporters: tuple[ArtifactExporter, ...] = DEFAULT_EXPORTERS,
+        analysis_timeout_seconds: float = ANALYSIS_TIMEOUT_SECONDS,
+        synthesis_timeout_seconds: float = SYNTHESIS_TIMEOUT_SECONDS,
     ) -> None:
         self._uow = uow
         self._blobs = blobs
         self._llm = llm
         self._cost_ceiling_usd = cost_ceiling_usd
         self._exporters = exporters
+        self._analysis_timeout = analysis_timeout_seconds
+        self._synthesis_timeout = synthesis_timeout_seconds
 
     async def run(self, job: ClaimedJob) -> JobOutcome:
+        # Every log line written while this job runs carries who and which attempt.
+        with structlog.contextvars.bound_contextvars(
+            job_id=str(job.job_id), tenant_id=str(job.tenant_id), attempt=job.attempt
+        ):
+            return await self._run(job)
+
+    async def _run(self, job: ClaimedJob) -> JobOutcome:
         if attempts_exhausted(job.attempt):
             # Earlier attempts ended without recording anything (crash, OOM, lost
             # lease) — the claim counted them anyway. Stop instead of looping forever.
@@ -199,7 +221,7 @@ class JobRunner:
                     cache_read_tokens=usage.cache_read_tokens,
                 )
         except Exception:
-            logger.exception("worker.failed_spend_unrecorded", job_id=str(job.job_id))
+            logger.exception("worker.failed_spend_unrecorded")
 
     async def _execute(self, job: ClaimedJob) -> None:
         llm = _RecordFailedSpend(self._llm, lambda usage: self._record_usage(job, usage))
@@ -242,7 +264,11 @@ class JobRunner:
         async def checkpoint(result: PassResult) -> None:
             await self._checkpoint(job, result)
 
-        await run_passes(missing, manuscript, llm, on_pass_completed=checkpoint)
+        await _within(
+            self._analysis_timeout,
+            "analysis",
+            run_passes(missing, manuscript, llm, on_pass_completed=checkpoint),
+        )
         pass_results = [await self._load_checkpoint(job.job_id, p.name) for p in ANALYSIS_PASSES]
 
         async with self._uow() as repos:
@@ -250,7 +276,11 @@ class JobRunner:
         if synthesis_done:
             synthesis = await self._load_synthesis(job.job_id)
         else:
-            synthesis = await run_synthesis(manuscript, pass_results, llm)
+            synthesis = await _within(
+                self._synthesis_timeout,
+                "synthesis",
+                run_synthesis(manuscript, pass_results, llm),
+            )
             await self._checkpoint_synthesis(job, synthesis)
 
         async with self._uow() as repos:
@@ -354,11 +384,10 @@ class JobRunner:
         retryable = exc.retryable if isinstance(exc, EdittaError) else True
         decision = decide_after_failure(attempts_made=job.attempt, retryable=retryable)
         error = _error_message(exc)
-        log = logger.bind(job_id=str(job.job_id), tenant_id=str(job.tenant_id))
         if isinstance(exc, EdittaError):
-            log.warning("job.attempt_failed", error=error, attempt=job.attempt)
+            logger.warning("job.attempt_failed", error=error)
         else:
-            log.exception("job.attempt_crashed", attempt=job.attempt)
+            logger.exception("job.attempt_crashed")
 
         if decision.retry_after_seconds is None:  # terminal: retrying cannot help
             return await self._dead_letter(job, error)
@@ -398,5 +427,5 @@ class JobRunner:
         return JobOutcome.dead(error=error)
 
     def _abandon(self, job: ClaimedJob, exc: LeaseLost) -> JobOutcome:
-        logger.warning("job.lease_lost", job_id=str(job.job_id), worker=job.lease_owner)
+        logger.warning("job.lease_lost", worker=job.lease_owner)
         return JobOutcome.abandoned(error=str(exc))

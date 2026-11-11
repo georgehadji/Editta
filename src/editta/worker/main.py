@@ -21,6 +21,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from editta.adapters.llm import build_llm_client
+from editta.adapters.llm.instrumented import InstrumentedLLMClient
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
     CreditLedgerRepository,
@@ -34,6 +35,7 @@ from editta.adapters.queue.postgres import DEFAULT_LEASE_SECONDS, PostgresJobQue
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import Settings, load_settings, worker_database_url
 from editta.domain.models import ClaimedJob, JobOutcomeKind
+from editta.observability import configure_logging
 from editta.services.jobs import JobRepositories, JobRunner, JobUnitOfWork
 
 logger = structlog.get_logger(__name__)
@@ -78,12 +80,17 @@ class Worker:
             access_key=settings.s3_access_key,
             secret_key=settings.s3_secret_key,
         )
-        self._llm = build_llm_client(
-            anthropic_api_key=settings.anthropic_api_key,
-            openrouter_api_key=settings.openrouter_api_key,
-            max_concurrency=settings.max_llm_concurrency,
+        self._llm = InstrumentedLLMClient(
+            build_llm_client(
+                anthropic_api_key=settings.anthropic_api_key,
+                openrouter_api_key=settings.openrouter_api_key,
+                max_concurrency=settings.max_llm_concurrency,
+                rate_limit_per_minute=settings.llm_requests_per_minute,
+            )
         )
         self._cost_ceiling_usd = settings.job_cost_ceiling_usd
+        self._analysis_timeout = settings.analysis_timeout_seconds
+        self._synthesis_timeout = settings.synthesis_timeout_seconds
         self._shutdown = asyncio.Event()
 
     def request_shutdown(self) -> None:
@@ -113,12 +120,23 @@ class Worker:
             return await PostgresJobQueue(session).claim(worker_id=self._worker_id)
 
     async def _process(self, claimed: ClaimedJob) -> None:
-        log = logger.bind(job_id=str(claimed.job_id), worker_id=self._worker_id)
+        # Bound before the heartbeat task is created, so its lines carry the ids too.
+        with structlog.contextvars.bound_contextvars(
+            job_id=str(claimed.job_id),
+            tenant_id=str(claimed.tenant_id),
+            worker_id=self._worker_id,
+        ):
+            await self._process_claimed(claimed)
+
+    async def _process_claimed(self, claimed: ClaimedJob) -> None:
+        log = logger
         runner = JobRunner(
             uow=job_unit_of_work(self._uow, claimed.tenant_id),
             blobs=self._blobs,
             llm=self._llm,
             cost_ceiling_usd=self._cost_ceiling_usd,
+            analysis_timeout_seconds=self._analysis_timeout,
+            synthesis_timeout_seconds=self._synthesis_timeout,
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_loop(claimed.job_id))
         try:
@@ -188,7 +206,7 @@ async def _run(settings: Settings) -> None:
 
 
 def main() -> None:
-    structlog.configure(processors=[structlog.processors.JSONRenderer()])
+    configure_logging("worker")
     with suppress(ImportError):
         import uvloop
 

@@ -21,6 +21,8 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from typing import cast
 
+import structlog
+
 from editta.domain.budget import check_budget, check_token_ceiling, project_remaining_cost_usd
 from editta.domain.errors import EdittaError
 from editta.domain.models import (
@@ -48,6 +50,8 @@ ANALYSIS_PASSES: tuple[AnalysisPass, ...] = (
 )
 
 PassCompletedHook = Callable[[PassResult], Awaitable[None]]
+# What logs call the synthesis step (it is not one of ANALYSIS_PASSES).
+SYNTHESIS_STEP_NAME = "synthesis"
 
 
 async def preflight(
@@ -81,14 +85,15 @@ async def run_pass(
     analysis_pass: AnalysisPass, manuscript: ManuscriptText, llm: LLMClient, *, cache: CachePolicy
 ) -> PassResult:
     prompt = analysis_pass.build_prompt(manuscript)
-    result = await llm.analyze(
-        prompt,
-        analysis_pass.output_schema,
-        cache=cache,
-        effort=analysis_pass.effort,
-        model=analysis_pass.model,
-        fallbacks=analysis_pass.fallback_models,
-    )
+    with structlog.contextvars.bound_contextvars(pass_name=analysis_pass.name):
+        result = await llm.analyze(
+            prompt,
+            analysis_pass.output_schema,
+            cache=cache,
+            effort=analysis_pass.effort,
+            model=analysis_pass.model,
+            fallbacks=analysis_pass.fallback_models,
+        )
     # Concrete analysis passes always use PassFindings (base.py's Protocol only
     # guarantees BaseModel); synthesis has its own schema and its own function below.
     findings = cast(PassFindings, result.output).findings
@@ -174,12 +179,13 @@ async def run_synthesis(
     only *write* a new entry at 1.25x for a prefix nothing else will reuse.
     """
     synthesis_pass = SynthesisPass()
-    result = await llm.analyze(
-        synthesis_pass.build_prompt(manuscript, list(pass_results)),
-        synthesis_pass.output_schema,
-        cache=CachePolicy.NONE,
-        effort=synthesis_pass.effort,
-        model=synthesis_pass.model,
-        fallbacks=synthesis_pass.fallback_models,
-    )
+    with structlog.contextvars.bound_contextvars(pass_name=SYNTHESIS_STEP_NAME):
+        result = await llm.analyze(
+            synthesis_pass.build_prompt(manuscript, list(pass_results)),
+            synthesis_pass.output_schema,
+            cache=CachePolicy.NONE,
+            effort=synthesis_pass.effort,
+            model=synthesis_pass.model,
+            fallbacks=synthesis_pass.fallback_models,
+        )
     return resolve_synthesis(result.output, catalog_findings(pass_results))

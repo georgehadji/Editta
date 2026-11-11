@@ -23,6 +23,7 @@ from editta.adapters.persistence.repositories import (
 from editta.adapters.persistence.roles import require_rls_bypass
 from editta.adapters.storage.s3 import S3BlobStore
 from editta.config import load_settings, worker_database_url
+from editta.observability import configure_logging
 from editta.services.retention import (
     RetentionRepositories,
     RetentionUnitOfWork,
@@ -68,7 +69,7 @@ async def _main_async() -> SweepResult:
 
 
 def main() -> None:
-    structlog.configure(processors=[structlog.processors.JSONRenderer()])
+    configure_logging("retention")
     result = asyncio.run(_main_async())
     print(f"retention sweep: {result.purged} purged, {result.failed} failed")
     if result.failed:

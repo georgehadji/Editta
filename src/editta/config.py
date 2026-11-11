@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     # links shown on the page) require opting in with EDITTA_ENVIRONMENT=development.
     environment: str = "production"
     max_llm_concurrency: int = 4
+    # This worker process's share of the organisation's LLM requests per minute. The
+    # bucket is per process: with N workers set it to (organisation limit) / N.
+    llm_requests_per_minute: int = Field(default=50, ge=1)
+    # Wall-clock limits for the model phases of one job attempt. Past them the attempt
+    # fails as retryable and the retry resumes from the checkpointed passes.
+    analysis_timeout_seconds: float = Field(default=1800.0, gt=0)
+    synthesis_timeout_seconds: float = Field(default=900.0, gt=0)
     job_cost_ceiling_usd: float = Field(default=6.0, gt=0)
     job_cost_credits: int = Field(default=1, ge=1)
     manuscript_retention_days: int = 30
