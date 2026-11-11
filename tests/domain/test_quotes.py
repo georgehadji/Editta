@@ -5,7 +5,6 @@ import pytest
 from editta.domain.models import Finding, Severity
 from editta.domain.quotes import (
     anchor_findings,
-    is_quote_anchored,
     locate_quote,
     normalize_text,
     normalize_with_map,
@@ -28,6 +27,10 @@ def test_empty_quote_is_not_anchored() -> None:
 
 def _finding(quote: str) -> Finding:
     return Finding(section="ch2", quote=quote, issue="i", severity=Severity.MINOR, suggestion="s")
+
+
+def is_quote_anchored(quote: str, source: str) -> bool:
+    return bool(anchor_findings([_finding(quote)], source))
 
 
 def test_anchor_findings_drops_fabricated_quotes() -> None:

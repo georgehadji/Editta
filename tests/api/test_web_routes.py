@@ -158,7 +158,7 @@ def test_full_login_upload_flow_unassisted(client: TestClient) -> None:
         headers={"X-CSRF-Token": csrf},
     )
     assert upload.status_code == 200
-    assert "essay.docx" not in upload.text  # job list shows manuscript_id, not filename
+    assert "essay.docx" in upload.text  # the job list names the file, not its id
     assert "pending" in upload.text
 
 
@@ -283,30 +283,39 @@ def test_sign_in_link_requests_are_rate_limited(client: TestClient) -> None:
 def _rendered_job_list(*, state: str, kinds: set[str]) -> str:
     job = SimpleNamespace(id=uuid4(), manuscript_id=uuid4(), state=state, error=None)
     template = get_templates().get_template("_job_list.html")
-    return template.render(tenant_id=TENANT_ID, jobs=[job], artifacts={job.id: kinds})
+    return template.render(
+        tenant_id=TENANT_ID,
+        jobs=[job],
+        artifacts={job.id: kinds},
+        titles={job.manuscript_id: "Ο λαβύρινθος.docx"},
+    )
+
+
+def test_each_job_is_listed_by_its_file_name() -> None:
+    assert "Ο λαβύρινθος.docx" in _rendered_job_list(state="analyzing", kinds=set())
 
 
 def test_a_finished_job_with_comments_offers_the_commented_file() -> None:
     html = _rendered_job_list(state="completed", kinds={"report", "annotated_manuscript"})
-    assert "/download" in html
+    assert "/artifacts/report" in html
     assert "/artifacts/annotated_manuscript" in html
 
 
 def test_a_finished_job_without_comments_offers_only_the_report() -> None:
     html = _rendered_job_list(state="completed", kinds={"report"})
-    assert "/download" in html
+    assert "/artifacts/report" in html
     assert "annotated_manuscript" not in html
 
 
 def test_an_unfinished_job_offers_no_download() -> None:
     html = _rendered_job_list(state="analyzing", kinds=set())
-    assert "/download" not in html
+    assert "/artifacts/report" not in html
     assert "annotated_manuscript" not in html
 
 
 def test_the_job_table_asks_for_itself_only_while_a_job_is_running() -> None:
     template = get_templates().get_template("_job_list.html")
-    context = {"tenant_id": TENANT_ID, "jobs": [], "artifacts": {}}
+    context = {"tenant_id": TENANT_ID, "jobs": [], "artifacts": {}, "titles": {}}
 
     assert "hx-trigger" in template.render(**context, polling=True)
     assert "hx-trigger" not in template.render(**context, polling=False)
@@ -315,10 +324,10 @@ def test_the_job_table_asks_for_itself_only_while_a_job_is_running() -> None:
 @pytest.mark.parametrize(
     ("states", "running"),
     [
-        (["completed", "dead", "cancelled"], False),
+        (["completed", "dead"], False),
         ([], False),
         (["completed", "analyzing"], True),
-        (["failed"], True),  # between a failed attempt and its retry
+        (["pending"], True),  # between a failed attempt and its retry
     ],
 )
 def test_a_job_is_running_until_it_reaches_a_final_state(states: list[str], running: bool) -> None:

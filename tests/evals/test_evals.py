@@ -49,9 +49,10 @@ def test_essays_are_long_enough_to_be_cached(checklist) -> None:  # noqa: ANN001
     assert len(_essay(checklist.essay)) > 1_500
 
 
-def test_markdown_headings_become_parsed_sections() -> None:
+def test_markdown_headings_become_their_own_lines() -> None:
     manuscript = parse_manuscript(markdown_to_docx(_essay("poli_kai_mnimi.md")), "x.docx")
-    assert manuscript.sections[:2] == ("Σκέψεις", "Η θέση")
+    lines = manuscript.text.splitlines()
+    assert "Σκέψεις" in lines and "Η θέση" in lines
 
 
 @pytest.mark.asyncio

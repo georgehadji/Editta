@@ -17,8 +17,6 @@ second still pointed at — and it put client-supplied names into object-store p
 The sanitized original filename is kept only as DB metadata.
 """
 
-import hashlib
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -33,7 +31,7 @@ from editta.adapters.persistence.repositories import (
 )
 from editta.domain.credits import DEFAULT_JOB_COST_CREDITS, require_credits, reservation_key
 from editta.domain.errors import EdittaError
-from editta.domain.ports import BlobStore
+from editta.domain.ports import BlobStore, single_chunk
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,10 +42,6 @@ class SubmittedManuscript:
 
 def manuscript_blob_key(tenant_id: UUID, object_id: UUID) -> str:
     return f"{tenant_id}/manuscripts/{object_id}/source"
-
-
-async def _single_chunk(data: bytes) -> AsyncIterator[bytes]:
-    yield data
 
 
 async def submit_manuscript(
@@ -75,7 +69,7 @@ async def submit_manuscript(
     # Store first, lock second: the upload to object storage is the slow part, and
     # the lock should be held for milliseconds, not for the whole transfer.
     blob_key = manuscript_blob_key(tenant_id, uuid4())
-    await blobs.put(blob_key, _single_chunk(data))
+    await blobs.put(blob_key, single_chunk(data))
     try:
         if not await tenants.lock(tenant_id):
             raise EdittaError(f"tenant {tenant_id} not found")
@@ -84,7 +78,6 @@ async def submit_manuscript(
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256=hashlib.sha256(data).hexdigest(),
             retention_until=(now or datetime.now(UTC)) + timedelta(days=retention_days),
         )
         job = await jobs.create(tenant_id=tenant_id, manuscript_id=manuscript.id)
@@ -103,4 +96,6 @@ async def submit_manuscript(
         # never delete it. Keep nothing of the manuscript.
         await blobs.delete_prefix(blob_key)
         raise
+    # shortcut: the caller commits after this returns; if that commit fails, the blob has
+    # no row and the retention sweep never deletes it. Add an orphan sweep if this occurs.
     return SubmittedManuscript(manuscript_id=manuscript.id, job_id=job.id)

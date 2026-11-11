@@ -1,4 +1,4 @@
-"""JobQueue port + Postgres SKIP LOCKED implementation.
+"""Postgres SKIP LOCKED job queue.
 
 Claim doesn't touch job `state` — that stays the job runner's decision (it inspects
 checkpointed PassResults to resume at the right pipeline stage). Claim only grants
@@ -30,14 +30,22 @@ from editta.domain.states import CUSTOMER_FAILURE
 
 DEFAULT_LEASE_SECONDS = 300
 
+# Round-robin across tenants: a job's turn is its place in its own tenant's queue (how many
+# older unfinished jobs that tenant has), oldest first within a turn. Plain created_at
+# order made one tenant's batch of 30 uploads hold every other tenant back for hours.
 _CLAIM_SQL = text("""
     UPDATE analysis_jobs
     SET lease_owner = :worker_id, lease_expires_at = :lease_expires_at, attempt = attempt + 1
     WHERE id = (
-        SELECT id FROM analysis_jobs
-        WHERE state NOT IN ('completed', 'failed', 'dead', 'cancelled')
+        SELECT id FROM analysis_jobs AS job
+        WHERE state NOT IN ('completed', 'dead')
           AND (lease_expires_at IS NULL OR lease_expires_at < :now)
-        ORDER BY created_at
+        ORDER BY (
+            SELECT count(*) FROM analysis_jobs AS older
+            WHERE older.tenant_id = job.tenant_id
+              AND older.state NOT IN ('completed', 'dead')
+              AND older.created_at < job.created_at
+        ), created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     )
@@ -74,7 +82,7 @@ _HEALTH_SQL = text("""
               AND updated_at >= now() - make_interval(secs => :window)
         ) AS dead_recently,
         extract(epoch FROM now() - min(created_at) FILTER (
-            WHERE state NOT IN ('completed', 'failed', 'dead', 'cancelled')
+            WHERE state NOT IN ('completed', 'dead')
               AND (lease_expires_at IS NULL OR lease_expires_at < now())
         )) AS oldest_waiting_seconds
     FROM analysis_jobs

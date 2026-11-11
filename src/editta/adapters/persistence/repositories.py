@@ -105,14 +105,13 @@ class ManuscriptRepository:
         self._session = session
 
     async def create(
-        self, *, tenant_id: UUID, title: str, blob_key: str, sha256: str, retention_until: datetime
+        self, *, tenant_id: UUID, title: str, blob_key: str, retention_until: datetime
     ) -> Manuscript:
         manuscript = Manuscript(
             id=uuid4(),
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256=sha256,
             retention_until=retention_until,
         )
         self._session.add(manuscript)
@@ -124,6 +123,15 @@ class ManuscriptRepository:
             Manuscript.tenant_id == tenant_id, Manuscript.id == manuscript_id
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def titles(self, tenant_id: UUID, manuscript_ids: list[UUID]) -> dict[UUID, str]:
+        """File names for the dashboard's job list, one query for the whole page."""
+        if not manuscript_ids:
+            return {}
+        stmt = select(Manuscript.id, Manuscript.title).where(
+            Manuscript.tenant_id == tenant_id, Manuscript.id.in_(manuscript_ids)
+        )
+        return {row.id: row.title for row in (await self._session.execute(stmt)).all()}
 
     async def list_expired(self, before: datetime) -> list[Manuscript]:
         # Retention sweep is a platform-level job, not tenant-scoped by design (it runs
@@ -336,9 +344,6 @@ class CreditLedgerRepository:
             .returning(CreditLedger.id)
         )
         return result.scalar_one_or_none() is not None
-
-    async def has_entry(self, idempotency_key: str) -> bool:
-        return await self.entry_delta(idempotency_key) is not None
 
     async def entry_delta(self, idempotency_key: str) -> int | None:
         stmt = select(CreditLedger.delta).where(CreditLedger.idempotency_key == idempotency_key)

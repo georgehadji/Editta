@@ -1,4 +1,8 @@
-"""AnalysisJob state machine + retry policy (PLAN.md §3). Pure: no I/O, no clock."""
+"""AnalysisJob states + retry policy (PLAN.md §3). Pure: no I/O, no clock.
+
+The runner moves a job forward PENDING -> PARSING -> ANALYZING -> SYNTHESIZING ->
+EXPORTING -> COMPLETED, and a resumed job starts again at PARSING; every write is
+fenced on the lease (services/jobs.py), which is the rule that actually protects it."""
 
 from dataclasses import dataclass
 from enum import StrEnum
@@ -11,44 +15,15 @@ class JobState(StrEnum):
     SYNTHESIZING = "synthesizing"
     EXPORTING = "exporting"
     COMPLETED = "completed"
-    FAILED = "failed"
     DEAD = "dead"
-    CANCELLED = "cancelled"
 
 
-_LINEAR = (
-    JobState.PENDING,
-    JobState.PARSING,
-    JobState.ANALYZING,
-    JobState.SYNTHESIZING,
-    JobState.EXPORTING,
-    JobState.COMPLETED,
-)
-
-_ALLOWED: dict[JobState, frozenset[JobState]] = {
-    state: frozenset({_LINEAR[i + 1], JobState.FAILED, JobState.CANCELLED})
-    for i, state in enumerate(_LINEAR[:-1])
-}
-_ALLOWED[JobState.COMPLETED] = frozenset()
-_ALLOWED[JobState.FAILED] = frozenset({JobState.PENDING, JobState.DEAD})
-_ALLOWED[JobState.DEAD] = frozenset()
-_ALLOWED[JobState.CANCELLED] = frozenset()
-
-TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD, JobState.CANCELLED})
+# The same two names end the queue's claim query (adapters/queue/postgres.py).
+TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD})
 
 # `failure_kind` of a job that died because of what the customer uploaded (an unreadable
 # file, a manuscript too long or too costly). It is refunded and needs no operator.
 CUSTOMER_FAILURE = "customer"
-
-
-def can_transition(current: JobState, target: JobState) -> bool:
-    return target in _ALLOWED[current]
-
-
-def transition(current: JobState, target: JobState) -> JobState:
-    if not can_transition(current, target):
-        raise ValueError(f"illegal job transition: {current} -> {target}")
-    return target
 
 
 # --- Retry policy ---------------------------------------------------------------
@@ -60,11 +35,8 @@ RETRY_MAX_DELAY_SECONDS = 30 * 60
 
 @dataclass(frozen=True, slots=True)
 class FailureDecision:
-    """What happens to a job after a failed attempt.
-
-    `next_state` is reached from FAILED via the state machine (FAILED -> PENDING to
-    retry, FAILED -> DEAD to give up). `retry_after_seconds` is only set on retry.
-    """
+    """What happens to a job after a failed attempt: back to PENDING to retry (with
+    `retry_after_seconds`), or DEAD to give up."""
 
     attempts_made: int
     next_state: JobState
@@ -95,9 +67,8 @@ def decide_after_failure(
     if attempts_made < 1:
         raise ValueError("attempts_made must be >= 1")
     if retryable and attempts_made < max_attempts:
-        next_state = transition(JobState.FAILED, JobState.PENDING)
-        return FailureDecision(attempts_made, next_state, retry_delay_seconds(attempts_made))
-    return FailureDecision(attempts_made, transition(JobState.FAILED, JobState.DEAD), None)
+        return FailureDecision(attempts_made, JobState.PENDING, retry_delay_seconds(attempts_made))
+    return FailureDecision(attempts_made, JobState.DEAD, None)
 
 
 def attempts_exhausted(attempt: int, max_attempts: int = MAX_ATTEMPTS) -> bool:

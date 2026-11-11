@@ -27,6 +27,7 @@ from editta.domain.budget import check_budget, check_token_ceiling, project_rema
 from editta.domain.errors import EdittaError
 from editta.domain.models import (
     CachePolicy,
+    LLMResult,
     ManuscriptText,
     PassFindings,
     PassResult,
@@ -170,9 +171,10 @@ def _most_decisive(errors: Sequence[BaseException]) -> BaseException:
 
 async def run_synthesis(
     manuscript: ManuscriptText, pass_results: Sequence[PassResult], llm: LLMClient
-) -> SynthesisReport:
+) -> LLMResult[SynthesisReport]:
     """Synthesis cites pass findings by id; the report is resolved from the anchored
-    originals, so it can contain no finding the passes did not produce.
+    originals, so it can contain no finding the passes did not produce. Returned with the
+    call's usage and serving model: it is the costliest call of a job.
 
     CachePolicy.NONE: synthesis's schema differs from the passes', so it cannot read
     their cache (format changes invalidate it), and a cache_control marker here would
@@ -188,4 +190,8 @@ async def run_synthesis(
             model=synthesis_pass.model,
             fallbacks=synthesis_pass.fallback_models,
         )
-    return resolve_synthesis(result.output, catalog_findings(pass_results))
+    return LLMResult(
+        output=resolve_synthesis(result.output, catalog_findings(pass_results)),
+        usage=result.usage,
+        model=result.model,
+    )

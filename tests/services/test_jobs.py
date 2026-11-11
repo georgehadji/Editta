@@ -127,7 +127,8 @@ async def test_happy_path_completes_and_writes_report() -> None:
     }
     assert h.ledger("job") == [-1]
     assert h.ledger("refund") == []
-    assert h.job.cost_input_tokens == 4 * 100  # type: ignore[attr-defined]
+    # Four passes and the synthesis: the costliest call counts too.
+    assert h.job.cost_input_tokens == 5 * 100  # type: ignore[attr-defined]
 
 
 class _Exporter:

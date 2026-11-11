@@ -103,7 +103,7 @@ async def test_synthesis_can_only_cite_existing_findings() -> None:
     results = await run_passes(ANALYSIS_PASSES, MANUSCRIPT, llm)
     originals = [f for r in results for f in r.findings]
 
-    synthesis = await run_synthesis(MANUSCRIPT, results, llm)
+    synthesis = (await run_synthesis(MANUSCRIPT, results, llm)).output
 
     reported = [f for s in synthesis.sections for f in s.findings]
     assert len(reported) == len(originals)  # unknown ids dropped, nothing added

@@ -2,12 +2,11 @@
 
 from collections.abc import AsyncIterator
 from typing import Protocol, TypeVar
-from uuid import UUID
 
 from pydantic import BaseModel
 
 from editta.domain.artifacts import ArtifactKind, ExportContext
-from editta.domain.models import CachePolicy, ClaimedJob, LLMResult, PromptParts
+from editta.domain.models import CachePolicy, LLMResult, PromptParts
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -29,19 +28,6 @@ class LLMClient(Protocol):
     async def count_tokens(self, parts: PromptParts, *, model: str) -> int: ...
 
 
-class JobQueue(Protocol):
-    async def claim(self, *, worker_id: str, lease_seconds: int) -> ClaimedJob | None: ...
-    async def heartbeat(self, job_id: UUID, worker_id: str, *, lease_seconds: int) -> None: ...
-    async def release(self, job_id: UUID, worker_id: str) -> None:
-        """No-op unless `worker_id` still holds the lease (fenced)."""
-        ...
-
-    async def defer(self, job_id: UUID, worker_id: str, *, delay_seconds: int) -> None:
-        """Release the lease but keep the job unclaimable until the delay elapses.
-        No-op unless `worker_id` still holds the lease (fenced)."""
-        ...
-
-
 class BlobStore(Protocol):
     async def put(self, key: str, data: AsyncIterator[bytes]) -> None: ...
 
@@ -55,6 +41,11 @@ class BlobStore(Protocol):
     async def presigned_get_url(
         self, key: str, *, expires_in: int, download_name: str | None = None
     ) -> str: ...
+
+
+async def single_chunk(data: bytes) -> AsyncIterator[bytes]:
+    """Bytes already in memory, in the shape `BlobStore.put` takes."""
+    yield data
 
 
 class ArtifactExporter(Protocol):

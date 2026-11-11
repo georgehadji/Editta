@@ -238,7 +238,8 @@ class OpenRouterLLMClient:
             except httpx.TimeoutException:
                 error = LLMTimeout("OpenRouter call timed out")
             except httpx.HTTPError as exc:
-                error = LLMError(f"OpenRouter call failed: {exc}")
+                # Type only, like the statuses above: this message reaches job.error.
+                error = LLMError(f"OpenRouter call failed ({type(exc).__name__})")
             except json.JSONDecodeError:
                 # Not str(exc): a decode error quotes the text it choked on.
                 error = LLMError("OpenRouter sent an unreadable response")

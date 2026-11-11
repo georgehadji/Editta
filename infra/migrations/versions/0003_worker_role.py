@@ -38,16 +38,19 @@ _TABLES = (
 
 
 def upgrade() -> None:
-    password = os.environ["EDITTA_WORKER_DB_PASSWORD"]
+    # SQL string literal: a ' in the password is doubled, not left to end the string.
+    password = os.environ["EDITTA_WORKER_DB_PASSWORD"].replace("'", "''")
+    if "$worker_role$" in password:
+        raise ValueError("EDITTA_WORKER_DB_PASSWORD must not contain '$worker_role$'")
     op.execute(
         f"""
-        DO $$
+        DO $worker_role$
         BEGIN
             IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'editta_worker') THEN
                 CREATE ROLE editta_worker WITH LOGIN PASSWORD '{password}' BYPASSRLS;
             END IF;
         END
-        $$;
+        $worker_role$;
         """
     )
     for table in _TABLES:

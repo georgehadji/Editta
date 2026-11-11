@@ -8,7 +8,6 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 
 from editta.api.deps import (
     SESSION_COOKIE_NAME,
-    AuthContext,
     get_account_service,
     get_current_auth,
     get_email_sender,
@@ -30,6 +29,7 @@ from editta.domain.ports import EmailSender
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
     AccountService,
+    AuthenticatedUser,
     InvalidMagicLink,
 )
 
@@ -98,14 +98,12 @@ async def verify_magic_link(
 @router.post("/invite", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_csrf)])
 async def invite_user(
     body: InviteRequest,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
+    auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     account_service: Annotated[AccountService, Depends(get_account_service)],
 ) -> Envelope[InviteResponse]:
     """Admins add a user to their own tenant; the user then signs in by email."""
     try:
-        user = await account_service.invite_user(
-            actor=auth.as_user(), email=body.email, role=body.role
-        )
+        user = await account_service.invite_user(actor=auth, email=body.email, role=body.role)
     except PermissionDenied as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     return Envelope.ok(InviteResponse(user_id=user.user_id, email=user.email, role=user.role))

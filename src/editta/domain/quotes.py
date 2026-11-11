@@ -78,12 +78,6 @@ def _normalize_quote(quote: str) -> str:
     return normalize_text(quote).strip(_EDGE_PUNCTUATION)
 
 
-def is_quote_anchored(
-    quote: str, source_text: str, *, threshold: float = QUOTE_MATCH_THRESHOLD
-) -> bool:
-    return _anchored(_normalize_quote(quote), normalize_text(source_text), threshold)
-
-
 def anchor_findings(findings: Iterable[Finding], source_text: str) -> list[Finding]:
     """Keep only findings whose quote identifies a passage of the source text."""
     source = normalize_text(source_text)  # once per pass, not once per finding

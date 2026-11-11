@@ -44,13 +44,19 @@ class FakeManuscriptRepo:
         record.id = manuscript_id
         self._records[(tenant_id, manuscript_id)] = record
 
+    async def titles(self, tenant_id: UUID, manuscript_ids: list[UUID]) -> dict[UUID, str]:
+        return {
+            m: self._records[(tenant_id, m)].title
+            for m in manuscript_ids
+            if (tenant_id, m) in self._records
+        }
+
     async def create(
         self,
         *,
         tenant_id: UUID,
         title: str,
         blob_key: str,
-        sha256: str,
         retention_until: Any = None,
     ) -> _ManuscriptRecord:
         record = _ManuscriptRecord(tenant_id, blob_key, title, retention_until)
@@ -254,9 +260,6 @@ class FakeLedgerRepo:
         self._seen_keys.add(key)
         self._deltas[key] = -credits
         self.entries.append({"tenant_id": tenant_id, "delta": -credits, "reason": "job"})
-
-    async def has_entry(self, idempotency_key: str) -> bool:
-        return idempotency_key in self._seen_keys
 
     async def entry_delta(self, idempotency_key: str) -> int | None:
         return self._deltas.get(idempotency_key)

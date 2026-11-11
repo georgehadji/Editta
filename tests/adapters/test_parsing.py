@@ -15,7 +15,7 @@ from editta.adapters.parsing.safety import (
     validate_upload,
 )
 from editta.domain.errors import ParseError
-from tests.adapters.pdf_factory import encrypted, text_pdf, with_outline
+from tests.adapters.pdf_factory import encrypted, text_pdf
 
 
 def _build_docx_bytes(paragraphs: list[str], heading: str | None = None) -> bytes:
@@ -76,14 +76,12 @@ def test_validate_upload_rejects_unsupported_extension() -> None:
         validate_upload(b"data", "essay.txt")
 
 
-def test_parse_docx_extracts_text_and_sections() -> None:
+def test_parse_docx_extracts_text_and_headings() -> None:
     data = _build_docx_bytes(["first paragraph", "second paragraph"], heading="Chapter One")
 
     manuscript = parse_manuscript(data, "essay.docx")
 
-    assert "first paragraph" in manuscript.text
-    assert "second paragraph" in manuscript.text
-    assert manuscript.sections == ("Chapter One",)
+    assert manuscript.text.splitlines() == ["Chapter One", "first paragraph", "second paragraph"]
     assert manuscript.source_filename == "essay.docx"
 
 
@@ -164,14 +162,7 @@ def test_parse_manuscript_dispatches_pdf_to_the_pdf_extractor() -> None:
 
 
 def test_parse_manuscript_dispatches_docx_to_the_docx_extractor() -> None:
-    manuscript = parse_manuscript(_build_docx_bytes(["hello"], heading="Ch"), "essay.docx")
-    assert manuscript.sections == ("Ch",)
-
-
-def test_parse_pdf_reads_sections_from_outline() -> None:
-    pdf = with_outline(text_pdf([["Intro text."], ["Body text."]]), ["Intro", "Body"])
-
-    assert parse_manuscript(pdf, "essay.pdf").sections == ("Intro", "Body")
+    assert parse_manuscript(_build_docx_bytes(["hello"]), "essay.docx").text == "hello"
 
 
 def test_parse_pdf_collapses_inline_whitespace() -> None:
@@ -238,3 +229,20 @@ def test_pdf_control_character_filter_keeps_ordinary_whitespace_and_text() -> No
     text = parse_manuscript(text_pdf([["one\ttwo"], ["three"]]), "essay.pdf").text
 
     assert text == "one two\nthree"
+
+
+def test_a_parser_error_message_never_carries_the_parsers_own_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pypdf's read errors quote the bytes around the bad object, i.e. manuscript text;
+    the message lands in job.error and the logs."""
+
+    def quoting_reader(*_args: object, **_kwargs: object) -> None:
+        raise pdf_module.PdfReadError("Invalid object near b'secret manuscript words'")
+
+    monkeypatch.setattr(pdf_module, "PdfReader", quoting_reader)
+
+    with pytest.raises(ParseError) as raised:
+        parse_manuscript(text_pdf([["anything"]]), "a.pdf")
+
+    assert "secret" not in str(raised.value)

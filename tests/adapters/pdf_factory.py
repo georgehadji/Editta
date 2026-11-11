@@ -55,15 +55,6 @@ def text_pdf(pages: list[list[str]]) -> bytes:
     return out.getvalue()
 
 
-def with_outline(pdf: bytes, titles: list[str]) -> bytes:
-    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf)))
-    for index, title in enumerate(titles):
-        writer.add_outline_item(title, min(index, len(writer.pages) - 1))
-    buffer = io.BytesIO()
-    writer.write(buffer)
-    return buffer.getvalue()
-
-
 def encrypted(pdf: bytes) -> bytes:
     writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf)))
     writer.encrypt(user_password="pw", owner_password="pw")  # noqa: S106 -- test fixture

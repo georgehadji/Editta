@@ -43,8 +43,9 @@ from editta.adapters.persistence.tables import Report
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.adapters.queue.postgres import PostgresJobQueue
 from editta.adapters.storage.local import LocalBlobStore
+from editta.cli import grant_credits
 from editta.domain.artifacts import ArtifactKind
-from editta.domain.errors import InsufficientCredits, LeaseLost, LLMError, ParseError
+from editta.domain.errors import EdittaError, InsufficientCredits, LeaseLost, LLMError, ParseError
 from editta.domain.models import JobOutcomeKind, PromptParts
 from editta.domain.states import JobState
 from editta.services.accounts import AccountService
@@ -206,7 +207,6 @@ async def test_rls_blocks_cross_tenant_manuscript_reads(
             tenant_id=tenant_a,
             title="secret.docx",
             blob_key="k",
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
 
@@ -243,7 +243,6 @@ async def test_skip_locked_claim_never_double_claims_under_concurrency(
             tenant_id=tenant_id,
             title="m.docx",
             blob_key="k",
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
         job = await AnalysisJobRepository(session).create(
@@ -271,7 +270,6 @@ async def _seed_job(
             tenant_id=tenant_id,
             title=title,
             blob_key=blob_key,
-            sha256="h",
             retention_until=datetime.now(UTC),
         )
         job = await AnalysisJobRepository(session).create(
@@ -310,10 +308,62 @@ async def test_ledger_append_once_is_idempotent_inside_one_transaction(
             tenant_id=tenant_id, delta=10, reason="purchase", idempotency_key="stripe:evt_1"
         )
         assert (first, replay) == (True, False)
-        assert await ledger.has_entry("stripe:evt_1")
+        assert await ledger.entry_delta("stripe:evt_1") is not None
 
     async with uow.begin(tenant_id) as session:
         assert await CreditLedgerRepository(session).balance(tenant_id) == 10
+
+
+@pytest.mark.asyncio
+async def test_operator_can_grant_credits_without_stripe(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with pg_worker_factory() as session:
+        tenant_id = (await TenantRepository(session).create(name="Pilot")).id
+        await session.commit()
+    uow = UnitOfWork(pg_session_factory)
+
+    assert await grant_credits(uow, tenant_id, 5) == 5
+    assert await grant_credits(uow, tenant_id, 3) == 8  # every grant is its own entry
+    assert await grant_credits(uow, tenant_id, -10) == -2  # a refunded purchase taken back
+    with pytest.raises(EdittaError, match="not be 0"):
+        await grant_credits(uow, tenant_id, 0)
+    with pytest.raises(EdittaError, match="not found"):
+        await grant_credits(uow, uuid4(), 5)
+
+
+@pytest.mark.asyncio
+async def test_one_tenants_batch_does_not_hold_back_another_tenant(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async def _queue(tenant_id: UUID) -> UUID:
+        async with pg_worker_factory() as session:  # one transaction each: distinct now()
+            manuscript = await ManuscriptRepository(session).create(
+                tenant_id=tenant_id,
+                title="m.docx",
+                blob_key="k",
+                retention_until=datetime.now(UTC),
+            )
+            job = await AnalysisJobRepository(session).create(
+                tenant_id=tenant_id, manuscript_id=manuscript.id
+            )
+            await session.commit()
+            return job.id
+
+    async with pg_worker_factory() as session:
+        big = (await TenantRepository(session).create(name="Big")).id
+        small = (await TenantRepository(session).create(name="Small")).id
+        await session.commit()
+    batch = [await _queue(big) for _ in range(3)]
+    late = await _queue(small)  # uploaded after the whole batch
+
+    async with pg_worker_factory() as session:
+        queue = PostgresJobQueue(session)
+        order = [(await queue.claim(worker_id=f"w{i}")) for i in range(4)]
+
+    assert [c.job_id for c in order if c is not None] == [batch[0], late, batch[1], batch[2]]
 
 
 @pytest.mark.asyncio
@@ -539,8 +589,8 @@ async def test_failed_attempt_keeps_checkpoints_and_retry_completes_on_real_db(
         ledger = CreditLedgerRepository(session)
         assert job is not None and (job.state, job.attempt) == (JobState.PENDING, 1)
         assert {r.pass_name for r in rows} == {"language", "metadata", "integrity"}
-        assert await ledger.has_entry(f"job:{job_id}:reserve")
-        assert not await ledger.has_entry(f"job:{job_id}:refund")
+        assert await ledger.entry_delta(f"job:{job_id}:reserve") is not None
+        assert await ledger.entry_delta(f"job:{job_id}:refund") is None
 
     async with pg_worker_factory() as session:
         queue = PostgresJobQueue(session)
@@ -600,7 +650,7 @@ async def test_stale_worker_cannot_kill_or_refund_a_job_another_worker_completed
     async with uow.begin(tenant_id) as session:
         job = await AnalysisJobRepository(session).get_by_id(tenant_id, job_id)
         assert job is not None and job.state == JobState.COMPLETED
-        assert not await CreditLedgerRepository(session).has_entry(f"job:{job_id}:refund")
+        assert await CreditLedgerRepository(session).entry_delta(f"job:{job_id}:refund") is None
 
 
 MANUSCRIPT_TEXT = "This is a Greek essay about language and structure and much more content here."

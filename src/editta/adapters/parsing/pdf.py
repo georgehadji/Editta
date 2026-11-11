@@ -1,12 +1,11 @@
-"""PDF -> normalized text + section map (defensive, text-layer PDFs only).
+"""PDF -> normalized text (defensive, text-layer PDFs only).
 
 Untrusted input: guard clauses first, then extraction. pypdf caps each stream's
 decompressed size itself (75 MB per stream, pypdf >= 6); the limits here bound the
 *total* — page count and extracted characters — which pypdf does not.
 
 Scanned (image-only) PDFs have no text layer and are rejected with a clear error;
-OCR is out of scope. Sections come from the PDF outline (bookmarks) when present —
-PDFs carry no reliable heading styles to recover them from otherwise.
+OCR is out of scope.
 """
 
 import io
@@ -17,13 +16,14 @@ from pypdf.errors import PdfReadError
 
 from editta.domain.errors import ParseError
 from editta.domain.models import ManuscriptText
+from editta.domain.xmltext import strip_xml_illegal
 
 MAX_PDF_PAGES = 2_000
 MAX_EXTRACTED_CHARS = 5_000_000  # ~1M words: far past any essay/book manuscript
 
-# Characters XML 1.0 forbids. Broken font maps put them in extracted text; they would
-# otherwise reach the prompts, be quoted back, and make the DOCX export raise.
-_XML_FORBIDDEN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+# Error messages name the failure only, never the exception text: pypdf's read errors
+# quote the bytes around the bad object, and in an uncompressed PDF that is manuscript
+# text (it would land in job.error and the logs).
 
 _INLINE_WHITESPACE = re.compile(r"[ \t ]+")
 
@@ -33,14 +33,14 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
     try:
         reader = PdfReader(io.BytesIO(data), strict=False)
     except (PdfReadError, ValueError, OSError) as exc:
-        raise ParseError(f"failed to parse .pdf: {exc}") from exc
+        raise ParseError("failed to parse .pdf") from exc
 
     if reader.is_encrypted:
         raise ParseError("encrypted or password-protected PDFs are not accepted")
     try:
         page_count = len(reader.pages)
     except Exception as exc:
-        raise ParseError(f"failed to read .pdf page tree: {exc}") from exc
+        raise ParseError("failed to read .pdf page tree") from exc
     if page_count > MAX_PDF_PAGES:
         raise ParseError(f"PDF has {page_count} pages; the limit is {MAX_PDF_PAGES}")
 
@@ -50,9 +50,11 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
         try:
             page_text = page.extract_text() or ""
         except Exception as exc:
-            raise ParseError(f"failed to extract text from PDF page {index + 1}: {exc}") from exc
+            raise ParseError(f"failed to extract text from PDF page {index + 1}") from exc
         for raw_line in page_text.splitlines():
-            line = _INLINE_WHITESPACE.sub(" ", _XML_FORBIDDEN.sub("", raw_line)).strip()
+            # Broken font maps put XML-forbidden characters in extracted text; they would
+            # reach the prompts, be quoted back, and make the DOCX export raise.
+            line = _INLINE_WHITESPACE.sub(" ", strip_xml_illegal(raw_line)).strip()
             if not line:
                 continue
             total_chars += len(line)
@@ -64,23 +66,4 @@ def extract_pdf(data: bytes, filename: str) -> ManuscriptText:
     if not full_text.strip():
         raise ParseError("PDF contains no extractable text (scanned PDFs are not supported)")
 
-    return ManuscriptText(
-        source_filename=filename, text=full_text, sections=_outline_titles(reader)
-    )
-
-
-def _outline_titles(reader: PdfReader) -> tuple[str, ...]:
-    """Top-level bookmark titles. Best-effort: a malformed outline yields no sections
-    rather than failing a document whose text extracted fine."""
-    try:
-        outline = reader.outline
-    except Exception:
-        return ()
-    titles: list[str] = []
-    for item in outline:
-        if isinstance(item, list):  # nested children of the previous entry
-            continue
-        title = getattr(item, "title", None)
-        if isinstance(title, str) and title.strip():
-            titles.append(title.strip())
-    return tuple(titles)
+    return ManuscriptText(source_filename=filename, text=full_text)

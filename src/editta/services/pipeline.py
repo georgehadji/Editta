@@ -23,7 +23,7 @@ async def run_pipeline(
         cost_ceiling_usd=cost_ceiling_usd,
     )
     pass_results = await run_passes(ANALYSIS_PASSES, manuscript, llm)
-    synthesis = await run_synthesis(manuscript, pass_results, llm)
+    synthesis = (await run_synthesis(manuscript, pass_results, llm)).output
     return assemble_report(
         manuscript_filename=filename, pass_results=pass_results, synthesis=synthesis
     )

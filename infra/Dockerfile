@@ -9,6 +9,9 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src ./src
 RUN pip install --no-cache-dir .
+# So a deploy can migrate from the image itself: `alembic upgrade head` in a container.
+COPY alembic.ini ./
+COPY infra/migrations ./infra/migrations
 
 # Never run as root: a bug in manuscript parsing should not own the container.
 RUN useradd --system --create-home --uid 10001 editta
