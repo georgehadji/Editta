@@ -42,7 +42,7 @@ def minio_endpoint() -> Iterator[str]:
     from testcontainers.core.container import DockerContainer
 
     container = (
-        DockerContainer("minio/minio:latest")
+        DockerContainer("quay.io/minio/minio:latest")
         .with_command("server /data")
         .with_env("MINIO_ROOT_USER", _USER)
         .with_env("MINIO_ROOT_PASSWORD", _PASSWORD)
