@@ -48,7 +48,14 @@ from editta.adapters.persistence.repositories import (
 )
 from editta.domain.artifacts import ArtifactKind, ExportContext, artifact_blob_key
 from editta.domain.credits import refund_key, reservation_key
-from editta.domain.errors import EdittaError, LeaseLost, LLMError, LLMTimeout, ParseError
+from editta.domain.errors import (
+    BudgetExceeded,
+    EdittaError,
+    LeaseLost,
+    LLMError,
+    LLMTimeout,
+    ParseError,
+)
 from editta.domain.models import (
     CachePolicy,
     ClaimedJob,
@@ -61,7 +68,12 @@ from editta.domain.models import (
     SynthesisReport,
 )
 from editta.domain.ports import ArtifactExporter, BlobStore, LLMClient
-from editta.domain.states import JobState, attempts_exhausted, decide_after_failure
+from editta.domain.states import (
+    CUSTOMER_FAILURE,
+    JobState,
+    attempts_exhausted,
+    decide_after_failure,
+)
 from editta.services.analysis import ANALYSIS_PASSES, preflight, run_passes, run_synthesis
 
 logger = structlog.get_logger(__name__)
@@ -239,6 +251,10 @@ class JobRunner:
         # event loop, so heartbeats keep the lease alive while it runs -- and bounded. A
         # thread cannot be cancelled: after a timeout it finishes in the background and
         # its result is dropped.
+        # shortcut: a hostile file that never finishes keeps its thread busy, up to one per
+        # attempt (3). The default pool is ~5 threads on one CPU and exports share it, so a
+        # few such uploads would starve the worker. Parse in a killable child process if
+        # that is ever seen (the ops check's "oldest claimable job" alarm would show it).
         try:
             manuscript = await asyncio.wait_for(
                 asyncio.to_thread(parse_manuscript, data, title), timeout=PARSE_TIMEOUT_SECONDS
@@ -390,7 +406,10 @@ class JobRunner:
             logger.exception("job.attempt_crashed")
 
         if decision.retry_after_seconds is None:  # terminal: retrying cannot help
-            return await self._dead_letter(job, error)
+            # An unreadable file or an over-budget manuscript is the customer's input:
+            # refunded, and not something the queue check should page anyone about.
+            customer = isinstance(exc, ParseError | BudgetExceeded)
+            return await self._dead_letter(job, error, customer_caused=customer)
         async with self._uow() as repos:
             await repos.jobs.set_state_if_owned(
                 job.tenant_id,
@@ -401,7 +420,9 @@ class JobRunner:
             )
         return JobOutcome.retry(error=error, after_seconds=decision.retry_after_seconds)
 
-    async def _dead_letter(self, job: ClaimedJob, error: str) -> JobOutcome:
+    async def _dead_letter(
+        self, job: ClaimedJob, error: str, *, customer_caused: bool = False
+    ) -> JobOutcome:
         # DEAD and the refund commit together, fenced: a worker that lost the job can
         # neither kill it nor refund it.
         async with self._uow() as repos:
@@ -411,6 +432,7 @@ class JobRunner:
                 lease_owner=job.lease_owner,
                 state=JobState.DEAD,
                 error=error,
+                failure_kind=CUSTOMER_FAILURE if customer_caused else None,
             )
             # Refund exactly what was reserved: nothing if the job died before its
             # reservation committed (no minted credit), and the reserved amount — not

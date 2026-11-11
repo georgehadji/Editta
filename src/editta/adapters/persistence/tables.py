@@ -69,6 +69,8 @@ class AnalysisJob(UUIDPKMixin, TimestampMixin, Base):
     manuscript_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("manuscripts.id"), index=True)
     state: Mapped[str] = mapped_column(default="pending", index=True)
     error: Mapped[str | None] = mapped_column(default=None)
+    # Set on a dead job: "customer" when the input was at fault (domain/states.py).
+    failure_kind: Mapped[str | None] = mapped_column(default=None)
     attempt: Mapped[int] = mapped_column(default=0)
     cost_input_tokens: Mapped[int] = mapped_column(default=0)
     cost_output_tokens: Mapped[int] = mapped_column(default=0)

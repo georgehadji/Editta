@@ -36,6 +36,10 @@ _ALLOWED[JobState.CANCELLED] = frozenset()
 
 TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD, JobState.CANCELLED})
 
+# `failure_kind` of a job that died because of what the customer uploaded (an unreadable
+# file, a manuscript too long or too costly). It is refunded and needs no operator.
+CUSTOMER_FAILURE = "customer"
+
 
 def can_transition(current: JobState, target: JobState) -> bool:
     return target in _ALLOWED[current]

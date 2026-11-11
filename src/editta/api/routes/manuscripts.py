@@ -116,19 +116,3 @@ async def get_artifact_download_url(
     except NotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return Envelope.ok(ReportDownloadResponse(url=download.url, expires_in=download.expires_in))
-
-
-@router.get("/jobs/{job_id}/report")
-async def get_report_download_url(
-    job_id: UUID,
-    auth: Annotated[AuthContext, Depends(get_current_auth)],
-    jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
-    manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
-    reports: Annotated[ReportRepository, Depends(get_report_repo)],
-    audit: Annotated[AuditEventRepository, Depends(get_audit_repo)],
-    blobs: Annotated[BlobStore, Depends(get_blob_store)],
-) -> Envelope[ReportDownloadResponse]:
-    """Kept for existing clients: the report is one artifact kind among several."""
-    return await get_artifact_download_url(
-        job_id, ArtifactKind.REPORT, auth, jobs, manuscripts, reports, audit, blobs
-    )

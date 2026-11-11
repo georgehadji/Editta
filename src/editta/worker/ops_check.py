@@ -2,7 +2,8 @@
 
 Same idiom as worker/retention.py: run once, print one line, let the scheduler (cron, a
 systemd timer, a monitoring wrapper) turn a non-zero exit into an alert. Two signals:
-  * a job was dead-lettered in the last 24 h (it ran out of attempts or hit a permanent error);
+  * a job was dead-lettered in the last 24 h (it ran out of attempts or hit a permanent error
+    of ours; a file the customer got wrong, such as a scanned PDF, does not count);
   * a claimable job has waited longer than an hour (no worker is taking it).
 The queue is read across every tenant, so like the worker it needs the BYPASSRLS
 `editta_worker` role.

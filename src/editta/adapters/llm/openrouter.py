@@ -217,15 +217,20 @@ class OpenRouterLLMClient:
                 async with self._http.stream("POST", API_URL, json=request) as response:
                     if response.status_code in _NON_RETRYABLE_STATUSES:
                         await response.aread()
+                        # Status only: a refusal body can quote the input (moderation
+                        # flags carry a snippet), and this message is kept in job.error.
                         raise LLMRequestRejected(
-                            f"OpenRouter rejected the request ({response.status_code}): "
-                            f"{response.text}"
+                            f"OpenRouter rejected the request ({response.status_code})"
                         )
                     if response.is_success:
                         body = await _read_body(response)
                         if not body.get("error"):
                             return body
-                        error = LLMError(f"OpenRouter provider error: {body['error']}")
+                        # Code only, for the same reason as the rejection above.
+                        code = (
+                            body["error"].get("code") if isinstance(body["error"], dict) else None
+                        )
+                        error = LLMError(f"OpenRouter provider error (code {code})")
                     else:
                         error = LLMError(f"OpenRouter call failed ({response.status_code})")
                         with contextlib.suppress(ValueError):  # HTTP-date: keep the backoff

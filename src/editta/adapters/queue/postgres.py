@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from editta.domain.models import ClaimedJob
+from editta.domain.states import CUSTOMER_FAILURE
 
 DEFAULT_LEASE_SECONDS = 300
 
@@ -62,11 +63,15 @@ _DEFER_SQL = text("""
 
 
 # Counts across every tenant, so it needs the BYPASSRLS worker role (ops_check uses it).
-# "Waiting" is the claim rule above: non-terminal and lease free or expired.
+# "Waiting" is the claim rule above: non-terminal and lease free or expired. A death caused by
+# the customer's input (failure_kind 'customer') is not counted: it is refunded and needs
+# nobody; unmarked deaths (NULL) are counted.
 _HEALTH_SQL = text("""
     SELECT
         count(*) FILTER (
-            WHERE state = 'dead' AND updated_at >= now() - make_interval(secs => :window)
+            WHERE state = 'dead'
+              AND failure_kind IS DISTINCT FROM :customer
+              AND updated_at >= now() - make_interval(secs => :window)
         ) AS dead_recently,
         extract(epoch FROM now() - min(created_at) FILTER (
             WHERE state NOT IN ('completed', 'failed', 'dead', 'cancelled')
@@ -88,7 +93,11 @@ class PostgresJobQueue:
         self._session = session
 
     async def health(self, *, dead_window_seconds: float) -> QueueHealth:
-        row = (await self._session.execute(_HEALTH_SQL, {"window": dead_window_seconds})).one()
+        row = (
+            await self._session.execute(
+                _HEALTH_SQL, {"window": dead_window_seconds, "customer": CUSTOMER_FAILURE}
+            )
+        ).one()
         waiting = row.oldest_waiting_seconds
         return QueueHealth(
             dead_recently=row.dead_recently,
