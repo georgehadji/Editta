@@ -68,14 +68,20 @@ async def stripe_webhook(
             if await TenantRepository(session).get_by_id(purchase.tenant_id) is None:
                 logger.warning("billing.event_for_unknown_tenant", event_id=event["id"])
                 return {"received": True}
-            # Stripe redelivers webhooks; append_once keys on the event id, so a
-            # replay is a no-op (ON CONFLICT DO NOTHING) rather than a double credit
-            # or an aborted transaction.
-            await CreditLedgerRepository(session).append_once(
+            ledger = CreditLedgerRepository(session)
+            # shortcut: transition guard for rows keyed on the event id before this
+            # deploy, delete 3 days after it ships (Stripe stops retrying by then).
+            if await ledger.has_purchase(purchase.checkout_session_id):
+                return {"received": True}
+            # One credit per Checkout Session, not per event: Stripe can send two
+            # crediting events for one session and redelivers each, and append_once
+            # makes a replay a no-op (ON CONFLICT DO NOTHING) rather than a double
+            # credit or an aborted transaction.
+            await ledger.append_once(
                 tenant_id=purchase.tenant_id,
                 delta=purchase.credits,
                 reason="purchase",
-                idempotency_key=f"stripe:{event['id']}",
+                idempotency_key=f"stripe-session:{purchase.checkout_session_id}",
                 stripe_ref=purchase.checkout_session_id,
             )
     return {"received": True}
