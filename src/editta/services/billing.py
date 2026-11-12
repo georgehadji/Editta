@@ -81,9 +81,10 @@ class BillingService:
         """The purchase to credit, or None when this event settles nothing: another event
         type, a checkout whose payment is still pending, or a session that is not ours.
 
-        For one Checkout Session Stripe sends `completed` with a settled status, or
-        `completed` as unpaid followed by `async_payment_succeeded` -- never two
-        crediting events -- so the event id stays a safe idempotency key.
+        Stripe's fulfillment guide says fulfillment may run "multiple times with the
+        same Checkout Session ID" and that two separate events can arrive for one
+        session, so the caller credits once per session id, not per event id
+        (docs/STATE_MACHINES_PLAN.md, D-3).
         """
         if event["type"] not in (CHECKOUT_COMPLETED_EVENT, ASYNC_PAYMENT_SUCCEEDED_EVENT):
             return None

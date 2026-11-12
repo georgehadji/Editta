@@ -362,6 +362,12 @@ class CreditLedgerRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def has_purchase(self, stripe_ref: str) -> bool:
+        stmt = select(CreditLedger.id).where(
+            CreditLedger.stripe_ref == stripe_ref, CreditLedger.reason == "purchase"
+        )
+        return (await self._session.execute(stmt.limit(1))).first() is not None
+
     async def entry_delta(self, idempotency_key: str) -> int | None:
         stmt = select(CreditLedger.delta).where(CreditLedger.idempotency_key == idempotency_key)
         return (await self._session.execute(stmt)).scalar_one_or_none()

@@ -323,6 +323,29 @@ async def test_ledger_append_once_is_idempotent_inside_one_transaction(
 
 
 @pytest.mark.asyncio
+async def test_has_purchase_finds_a_checkout_credited_under_the_old_event_key(
+    pg_session_factory: async_sessionmaker[AsyncSession],
+    pg_worker_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with pg_worker_factory() as session:
+        tenant_id = (await TenantRepository(session).create(name="Tenant")).id
+        await session.commit()
+
+    uow = UnitOfWork(pg_session_factory)
+    async with uow.begin(tenant_id) as session:
+        ledger = CreditLedgerRepository(session)
+        await ledger.append_once(
+            tenant_id=tenant_id,
+            delta=10,
+            reason="purchase",
+            idempotency_key="stripe:evt_old",
+            stripe_ref="cs_1",
+        )
+        assert await ledger.has_purchase("cs_1")
+        assert not await ledger.has_purchase("cs_2")
+
+
+@pytest.mark.asyncio
 async def test_operator_can_grant_credits_without_stripe(
     pg_session_factory: async_sessionmaker[AsyncSession],
     pg_worker_factory: async_sessionmaker[AsyncSession],
