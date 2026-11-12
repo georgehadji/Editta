@@ -2,17 +2,20 @@
 
 import html
 import logging
+import mimetypes
 import re
 
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from editta.api.deps import STATIC_DIR
 from editta.api.middleware import (
     MAX_REQUEST_BYTES,
     BodySizeLimitMiddleware,
@@ -94,3 +97,7 @@ app.include_router(manuscripts.router)
 app.include_router(billing.router)
 app.include_router(web.public_router)
 app.include_router(web.router)
+
+# The Windows registry can map .js to text/plain, which nosniff then refuses to run.
+mimetypes.add_type("text/javascript", ".js")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

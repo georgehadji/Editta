@@ -32,6 +32,7 @@ from editta.services.billing import BillingService
 
 SESSION_COOKIE_NAME = "editta_session"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+STATIC_DIR = TEMPLATES_DIR.parent / "static"
 
 
 @lru_cache

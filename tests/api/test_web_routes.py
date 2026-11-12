@@ -347,6 +347,20 @@ def test_a_poll_updates_the_summary_but_leaves_errors_alone(client: TestClient) 
     assert '<div id="poll-error" class="error-text" role="alert" hx-swap-oob="true">' in poll.text
 
 
+def test_pages_load_the_offline_message_script_from_our_own_origin(client: TestClient) -> None:
+    """A poll with no answer at all (server down) is reported by static/editta.js; the
+    CSP allows scripts from 'self' only, besides htmx."""
+    _sign_in(client)
+    assert (
+        '<script src="/static/editta.js" defer></script>'
+        in client.get(f"/t/{TENANT_ID}/dashboard").text
+    )
+    script = client.get("/static/editta.js")
+    assert script.status_code == 200
+    assert script.headers["content-type"].startswith("text/javascript")
+    assert "htmx:sendError" in script.text
+
+
 def test_the_header_balance_follows_polls_and_uploads(client: TestClient) -> None:
     """The dashboard header showed the balance from page load until a reload."""
     _sign_in(client)
