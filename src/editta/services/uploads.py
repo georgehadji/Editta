@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+import structlog
+
 from editta.adapters.parsing import sanitize_filename, validate_upload
 from editta.adapters.persistence.repositories import (
     AnalysisJobRepository,
@@ -32,6 +34,8 @@ from editta.adapters.persistence.repositories import (
 from editta.domain.credits import DEFAULT_JOB_COST_CREDITS, require_credits, reservation_key
 from editta.domain.errors import EdittaError
 from editta.domain.ports import BlobStore, single_chunk
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +98,11 @@ async def submit_manuscript(
     except Exception:
         # Refused or failed: no row will point at the blob, so the retention sweep could
         # never delete it. Keep nothing of the manuscript.
-        await blobs.delete_prefix(blob_key)
+        try:
+            await blobs.delete_prefix(blob_key)
+        except Exception:
+            # Log the orphan for an operator; raise the original error, not this one.
+            logger.exception("upload.orphan_blob", blob_key=blob_key)
         raise
     # shortcut: the caller commits after this returns; if that commit fails, the blob has
     # no row and the retention sweep never deletes it. Add an orphan sweep if this occurs.

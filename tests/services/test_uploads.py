@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import docx
 import pytest
+from structlog.testing import capture_logs
 
 from editta.domain.credits import reservation_key
 from editta.domain.errors import InsufficientCredits, ParseError
@@ -154,3 +155,23 @@ async def test_unexpected_failure_after_the_blob_is_stored_leaves_no_blob(
         await deps.submit(_docx(), "essay.docx")
 
     assert deps.blobs._data == {}  # the DB rows roll back with the transaction
+
+
+async def test_a_failed_cleanup_logs_the_orphan_and_keeps_the_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deps = Deps()
+
+    async def db_down(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("db down")
+
+    async def storage_down(*args: object, **kwargs: object) -> None:
+        raise OSError("storage down")
+
+    monkeypatch.setattr(deps.jobs, "create", db_down)
+    monkeypatch.setattr(deps.blobs, "delete_prefix", storage_down)
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="db down"):
+        await deps.submit(_docx(), "essay.docx")
+
+    assert [entry["event"] for entry in logs] == ["upload.orphan_blob"]

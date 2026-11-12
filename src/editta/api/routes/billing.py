@@ -7,16 +7,25 @@ dependency chain, which requires an authenticated request. Stripe isn't logged i
 """
 
 import asyncio
+from contextlib import suppress
 from typing import Annotated
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 
 from editta.adapters.persistence.repositories import CreditLedgerRepository, TenantRepository
 from editta.adapters.persistence.uow import UnitOfWork
-from editta.api.deps import get_billing_service, get_current_auth, get_uow
-from editta.services.accounts import AuthenticatedUser
+from editta.api.deps import (
+    SESSION_COOKIE_NAME,
+    get_account_service,
+    get_billing_service,
+    get_current_auth,
+    get_templates,
+    get_uow,
+)
+from editta.services.accounts import AccountService, AuthenticatedUser, InvalidSession
 from editta.services.billing import BillingService, WebhookVerificationError
 
 logger = structlog.get_logger(__name__)
@@ -73,8 +82,20 @@ async def stripe_webhook(
 
 
 @router.get("/success", response_class=HTMLResponse)
-async def checkout_success() -> HTMLResponse:
-    return HTMLResponse("<h1>Payment received</h1><p>Your credits will appear shortly.</p>")
+async def checkout_success(
+    request: Request,
+    account_service: Annotated[AccountService, Depends(get_account_service)],
+    templates: Annotated[Jinja2Templates, Depends(get_templates)],
+) -> HTMLResponse:
+    """Stripe sends the browser here before (or after) its webhook credits the tenant, so
+    the page says when credits arrive and links back to the dashboard, which shows the
+    balance, instead of a dead end. The session cookie is optional here."""
+    tenant_id = None
+    cookie = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie:
+        with suppress(InvalidSession):
+            tenant_id = (await account_service.authenticate_session(cookie)).tenant_id
+    return templates.TemplateResponse(request, "checkout_success.html", {"tenant_id": tenant_id})
 
 
 @router.get("/cancel", response_class=HTMLResponse)

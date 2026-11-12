@@ -206,7 +206,8 @@ def test_sign_out_clears_the_session(client: TestClient) -> None:
 
     assert response.status_code == 204
     assert response.headers["HX-Redirect"] == f"/t/{TENANT_ID}/login"
-    assert client.get(f"/t/{TENANT_ID}/dashboard").status_code == 401
+    after = client.get(f"/t/{TENANT_ID}/dashboard", follow_redirects=False)
+    assert after.status_code == 303
 
 
 def test_refused_upload_is_shown_to_htmx_users(client: TestClient) -> None:
@@ -258,9 +259,99 @@ def test_unknown_email_sees_the_same_page_and_gets_no_link(client: TestClient) -
     assert "auth/click" not in page.text
 
 
-def test_dashboard_without_login_redirects_or_401s(client: TestClient) -> None:
-    response = client.get(f"/t/{uuid4()}/dashboard")
+def test_dashboard_without_login_sends_the_browser_to_sign_in(client: TestClient) -> None:
+    tenant = uuid4()
+    response = client.get(f"/t/{tenant}/dashboard", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/t/{tenant}/login"
+
+
+def test_an_expired_session_during_polling_sends_htmx_to_sign_in(client: TestClient) -> None:
+    """htmx does not swap a 401, so the poll used to freeze silently."""
+    response = client.get(f"/t/{TENANT_ID}/jobs-fragment", headers={"HX-Request": "true"})
     assert response.status_code == 401
+    assert response.headers["HX-Redirect"] == f"/t/{TENANT_ID}/login"
+
+
+def test_other_htmx_errors_come_back_as_text_for_the_alert_region(client: TestClient) -> None:
+    _sign_in(client)
+    response = client.post(
+        f"/t/{TENANT_ID}/upload",
+        files={"file": ("essay.docx", _docx_bytes())},
+        headers={"X-CSRF-Token": "wrong", "HX-Request": "true"},
+    )
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("text/html")
+    assert "{" not in response.text  # not FastAPI's JSON body
+
+
+def test_the_json_api_keeps_its_401_body(client: TestClient) -> None:
+    response = client.get(f"/manuscripts/jobs/{uuid4()}", follow_redirects=False)
+    assert response.status_code == 401
+    assert "detail" in response.json()
+
+
+def test_every_page_routes_htmx_errors_to_the_alert_region(client: TestClient) -> None:
+    page = client.get(f"/t/{TENANT_ID}/login").text
+    assert 'id="htmx-error"' in page
+    assert '"target": "#htmx-error"' in page
+
+
+def test_an_unusable_sign_in_link_shows_the_form_with_the_reason(client: TestClient) -> None:
+    link = _emailed_link(client)
+    assert _confirm(client, link).status_code == 200
+    client.cookies.clear()
+
+    page = client.get(link)
+    assert page.status_code == 401
+    assert "already used" in page.text
+    assert f'action="/t/{TENANT_ID}/login"' in page.text  # ask for a new link right here
+
+
+def test_a_refused_confirm_shows_the_sign_in_page(client: TestClient) -> None:
+    token = _emailed_link(client).split("token=", 1)[1]
+    page = client.post(f"/t/{TENANT_ID}/auth/click", data={"token": token, "nonce": "guessed"})
+    assert page.status_code == 403
+    assert "open the sign-in link in this browser" in page.text
+    assert f'action="/t/{TENANT_ID}/login"' in page.text
+
+
+def test_the_upload_form_shows_it_is_busy_and_cannot_be_sent_twice(client: TestClient) -> None:
+    _sign_in(client)
+    page = client.get(f"/t/{TENANT_ID}/dashboard").text
+    assert 'hx-disabled-elt="find button"' in page
+    assert 'id="upload-busy"' in page
+    assert 'id="job-summary"' in page and 'aria-live="polite"' in page
+
+
+def test_a_successful_upload_clears_old_errors_and_the_file_field(client: TestClient) -> None:
+    _sign_in(client)
+    upload = client.post(
+        f"/t/{TENANT_ID}/upload",
+        files={"file": ("essay.docx", _docx_bytes())},
+        headers={"X-CSRF-Token": client.cookies.get("editta_csrf"), "HX-Request": "true"},
+    )
+    assert '<div id="upload-error" hx-swap-oob="true"></div>' in upload.text
+    assert 'id="htmx-error" class="error-text" role="alert" hx-swap-oob="true"' in upload.text
+    assert 'id="file"' in upload.text and 'hx-swap-oob="true"' in upload.text
+    assert "1 in progress" in upload.text  # the screen-reader summary
+
+
+def test_a_poll_updates_the_summary_but_leaves_errors_alone(client: TestClient) -> None:
+    _sign_in(client)
+    poll = client.get(f"/t/{TENANT_ID}/jobs-fragment", headers={"HX-Request": "true"})
+    assert 'id="job-summary"' in poll.text
+    assert "upload-error" not in poll.text
+
+
+def test_checkout_success_links_back_to_the_dashboard(client: TestClient) -> None:
+    anonymous = client.get("/billing/success")
+    assert anonymous.status_code == 200
+    assert "dashboard" not in anonymous.text
+
+    _sign_in(client)
+    page = client.get("/billing/success")
+    assert f'href="/t/{TENANT_ID}/dashboard"' in page.text
 
 
 def test_a_sign_in_link_cannot_be_used_twice(client: TestClient) -> None:

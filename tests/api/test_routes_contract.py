@@ -252,6 +252,23 @@ def test_admin_invite_lets_the_new_user_sign_in(client: TestClient, harness: Har
 
     assert invited.status_code == 201
     assert invited.json()["data"]["role"] == "editor"
+    assert invited.json()["data"]["role_applied"] is True
+
+
+def test_reinviting_an_existing_user_says_the_role_was_not_changed(
+    client: TestClient, harness: Harness
+) -> None:
+    _login(client, harness, ADMIN)
+
+    invited = client.post(
+        "/auth/invite",
+        json={"email": EDITOR, "role": "admin"},
+        headers={"X-CSRF-Token": client.cookies.get("editta_csrf")},
+    )
+
+    assert invited.status_code == 201
+    assert invited.json()["data"]["role"] == "editor"
+    assert invited.json()["data"]["role_applied"] is False
 
 
 def test_removed_user_loses_access_on_the_next_request(

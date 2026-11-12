@@ -5,6 +5,7 @@ tenant admin shares this tenant-specific login URL with their editors directly.
 
 import hmac
 import secrets
+from collections.abc import Iterable
 from typing import Annotated
 from uuid import UUID
 
@@ -49,7 +50,7 @@ from editta.api.middleware import SIGN_IN_LINK_LIMIT, limiter, new_csrf_cookie_v
 from editta.config import Settings
 from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
-from editta.domain.job_view import job_view
+from editta.domain.job_view import JobView, job_view
 from editta.domain.ports import BlobStore, EmailSender
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
@@ -92,6 +93,19 @@ def _upload_error(
 def _require_matching_tenant(auth: AuthenticatedUser, tenant_id: UUID) -> None:
     if auth.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "wrong tenant")
+
+
+def _login_error(
+    request: Request, templates: Jinja2Templates, tenant_id: UUID, message: str, status_code: int
+) -> HTMLResponse:
+    """A spent, expired or foreign sign-in link: the sign-in form again, with the reason, so
+    the user can ask for a new link instead of reading a JSON error. Status stays 401/403."""
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"tenant_id": tenant_id, "error": message},
+        status_code=status_code,
+    )
 
 
 @public_router.get("/t/{tenant_id}/login", response_class=HTMLResponse)
@@ -160,7 +174,7 @@ async def confirm_login_page(
             token, expected_tenant_id=tenant_id, consume=False
         )
     except InvalidMagicLink as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+        return _login_error(request, templates, tenant_id, str(exc), status.HTTP_401_UNAUTHORIZED)
     nonce = secrets.token_urlsafe(32)
     response = templates.TemplateResponse(
         request,
@@ -186,16 +200,21 @@ async def confirm_login(
     token: Annotated[str, Form()],
     nonce: Annotated[str, Form()],
     account_service: Annotated[AccountService, Depends(get_account_service)],
-) -> RedirectResponse:
+    templates: Annotated[Jinja2Templates, Depends(get_templates)],
+) -> Response:
     expected = request.cookies.get(LOGIN_NONCE_COOKIE)
     if not expected or not hmac.compare_digest(expected, nonce):
-        raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "open the sign-in link in this browser, then confirm"
+        return _login_error(
+            request,
+            templates,
+            tenant_id,
+            "open the sign-in link in this browser, then confirm",
+            status.HTTP_403_FORBIDDEN,
         )
     try:
         user = await account_service.complete_login(token, expected_tenant_id=tenant_id)
     except InvalidMagicLink as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+        return _login_error(request, templates, tenant_id, str(exc), status.HTTP_401_UNAUTHORIZED)
 
     session_token = account_service.issue_session_cookie(
         tenant_id=tenant_id, user_id=user.user_id, email=user.email
@@ -321,7 +340,9 @@ async def upload_via_web(
         )
         return _upload_error(request, templates, message=str(exc), status_code=code)
 
-    return await _job_list(request, tenant_id, jobs, manuscripts, reports, templates)
+    return await _job_list(
+        request, tenant_id, jobs, manuscripts, reports, templates, after_upload=True
+    )
 
 
 async def _job_list_context(
@@ -342,6 +363,7 @@ async def _job_list_context(
         # Once every job is finished the table stops asking for itself; an upload brings a
         # fresh table that starts again.
         "polling": any(not v.terminal for v in views.values()),
+        "summary": _summary(views.values()),
         "titles": await manuscripts.titles(tenant_id, [j.manuscript_id for j in job_list]),
     }
 
@@ -353,9 +375,24 @@ async def _job_list(
     manuscripts: ManuscriptRepository,
     reports: ReportRepository,
     templates: Jinja2Templates,
+    *,
+    after_upload: bool = False,
 ) -> HTMLResponse:
     context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
-    return templates.TemplateResponse(request, "_job_list.html", context)
+    return templates.TemplateResponse(
+        request, "_job_list_response.html", {**context, "after_upload": after_upload}
+    )
+
+
+def _summary(views: Iterable[JobView]) -> str:
+    """One sentence for the screen-reader live region (templates/_job_summary.html)."""
+    views = list(views)
+    counts = (
+        (sum(not v.terminal for v in views), "in progress"),
+        (sum(v.downloadable for v in views), "ready"),
+        (sum(v.refunded for v in views), "failed"),
+    )
+    return ", ".join(f"{n} {what}" for n, what in counts if n) or "No reports yet."
 
 
 @router.get("/t/{tenant_id}/jobs/{job_id}/artifacts/{kind}")

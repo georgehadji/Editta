@@ -106,4 +106,11 @@ async def invite_user(
         user = await account_service.invite_user(actor=auth, email=body.email, role=body.role)
     except PermissionDenied as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
-    return Envelope.ok(InviteResponse(user_id=user.user_id, email=user.email, role=user.role))
+    return Envelope.ok(
+        InviteResponse(
+            user_id=user.user_id,
+            email=user.email,
+            role=user.role,
+            role_applied=user.role == body.role,
+        )
+    )

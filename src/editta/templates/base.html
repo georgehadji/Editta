@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Editta{% endblock %}</title>
+  <!-- htmx ignores 4xx/5xx by default, so a failed upload, poll or sign-out did nothing on
+       screen. Error bodies go to #htmx-error instead (main.py words them for htmx).
+       A meta config, not a script: the CSP allows no inline script. -->
+  <meta name="htmx-config" content='{"responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "[45]..", "swap": true, "error": true, "target": "#htmx-error", "swapOverride": "innerHTML"}]}'>
   <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+" crossorigin="anonymous"></script>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
@@ -17,9 +21,13 @@
     .hint { display: block; font-family: system-ui, sans-serif; color: #555; }
     form.upload { margin-bottom: 1.5rem; }
     button { cursor: pointer; }
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
   </style>
 </head>
 <body>
+  <div id="htmx-error" class="error-text" role="alert"></div>
   {% block body %}{% endblock %}
 </body>
 </html>

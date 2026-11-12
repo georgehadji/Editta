@@ -41,6 +41,9 @@ class InviteResponse(BaseModel):
     user_id: UUID
     email: str
     role: str
+    # False when the email already had an account: inviting is idempotent and keeps the
+    # existing role, so the requested one was not applied.
+    role_applied: bool
 
 
 class MagicLinkVerifyRequest(BaseModel):

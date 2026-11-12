@@ -2,10 +2,10 @@
 {% block title %}Sign in — Editta{% endblock %}
 {% block body %}
   <h1>Sign in to Editta</h1>
+  {% if error %}<p class="error-text" role="alert">This sign-in link can't be used: {{ error }}. Enter your email to get a new one.</p>{% endif %}
   <form method="post" action="/t/{{ tenant_id }}/login">
     <label for="email">Email address</label><br>
     <input type="email" id="email" name="email" required autofocus>
     <button type="submit">Send sign-in link</button>
   </form>
-  {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
 {% endblock %}
