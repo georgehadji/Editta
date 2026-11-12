@@ -60,8 +60,10 @@ async def _browser_errors(request: Request, exc: StarletteHTTPException) -> Resp
 
     A 401 sends the user to that tenant's sign-in page: htmx follows `HX-Redirect`, a plain
     GET gets a 303. Any other error to an htmx request comes back as a line of text that
-    base.html's response handling puts in the alert region. The JSON API keeps FastAPI's
-    {"detail": ...} body."""
+    base.html's response handling puts in the alert region. A failed poll's text goes to
+    its own region instead, which the next good poll clears, so a passing hiccup does not
+    stay on screen and an upload's error is not wiped by a poll. The JSON API keeps
+    FastAPI's {"detail": ...} body."""
     tenant = _TENANT_PAGE.match(request.url.path)
     htmx = request.headers.get("HX-Request") == "true"
     if tenant and exc.status_code == 401:
@@ -71,7 +73,11 @@ async def _browser_errors(request: Request, exc: StarletteHTTPException) -> Resp
         if request.method == "GET":
             return RedirectResponse(login, status_code=303)
     if tenant and htmx:
-        return HTMLResponse(html.escape(str(exc.detail)), status_code=exc.status_code)
+        poll = request.url.path.endswith("/jobs-fragment")
+        headers = {"HX-Retarget": "#poll-error"} if poll else None
+        return HTMLResponse(
+            html.escape(str(exc.detail)), status_code=exc.status_code, headers=headers
+        )
     return await http_exception_handler(request, exc)
 
 
