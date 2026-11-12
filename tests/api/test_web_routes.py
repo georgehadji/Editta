@@ -375,6 +375,12 @@ def test_the_header_balance_follows_polls_and_uploads(client: TestClient) -> Non
     assert 'hx-swap-oob="true">2 credits' in upload.text  # the reservation shows at once
 
 
+def test_one_credit_is_singular() -> None:
+    template = get_templates().get_template("_credit_balance.html")
+    assert "1 credit —" in template.render(credit_balance=1)
+    assert "0 credits —" in template.render(credit_balance=0)
+
+
 def test_a_failed_poll_puts_its_message_where_the_next_poll_clears_it(
     client: TestClient,
 ) -> None:
