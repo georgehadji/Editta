@@ -22,11 +22,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from editta.domain.models import ClaimedJob
-from editta.domain.states import CUSTOMER_FAILURE
+from editta.domain.states import CUSTOMER_FAILURE, TERMINAL_STATES, JobState
 
 DEFAULT_LEASE_SECONDS = 300
 
@@ -38,19 +38,19 @@ _CLAIM_SQL = text("""
     SET lease_owner = :worker_id, lease_expires_at = :lease_expires_at, attempt = attempt + 1
     WHERE id = (
         SELECT id FROM analysis_jobs AS job
-        WHERE state NOT IN ('completed', 'dead')
+        WHERE state NOT IN :terminal
           AND (lease_expires_at IS NULL OR lease_expires_at < :now)
         ORDER BY (
             SELECT count(*) FROM analysis_jobs AS older
             WHERE older.tenant_id = job.tenant_id
-              AND older.state NOT IN ('completed', 'dead')
+              AND older.state NOT IN :terminal
               AND older.created_at < job.created_at
         ), created_at
         FOR UPDATE SKIP LOCKED
         LIMIT 1
     )
     RETURNING id, tenant_id, manuscript_id, attempt
-""")
+""").bindparams(bindparam("terminal", expanding=True))
 
 _HEARTBEAT_SQL = text("""
     UPDATE analysis_jobs SET lease_expires_at = :expires_at
@@ -77,16 +77,19 @@ _DEFER_SQL = text("""
 _HEALTH_SQL = text("""
     SELECT
         count(*) FILTER (
-            WHERE state = 'dead'
+            WHERE state = :dead
               AND failure_kind IS DISTINCT FROM :customer
               AND updated_at >= now() - make_interval(secs => :window)
         ) AS dead_recently,
         extract(epoch FROM now() - min(created_at) FILTER (
-            WHERE state NOT IN ('completed', 'dead')
+            WHERE state NOT IN :terminal
               AND (lease_expires_at IS NULL OR lease_expires_at < now())
         )) AS oldest_waiting_seconds
     FROM analysis_jobs
-""")
+""").bindparams(bindparam("terminal", expanding=True))
+
+# Bound into both queries above: the terminal set has one source, domain/states.py.
+_TERMINAL = sorted(s.value for s in TERMINAL_STATES)
 
 
 @dataclass(frozen=True)
@@ -103,7 +106,13 @@ class PostgresJobQueue:
     async def health(self, *, dead_window_seconds: float) -> QueueHealth:
         row = (
             await self._session.execute(
-                _HEALTH_SQL, {"window": dead_window_seconds, "customer": CUSTOMER_FAILURE}
+                _HEALTH_SQL,
+                {
+                    "window": dead_window_seconds,
+                    "customer": CUSTOMER_FAILURE,
+                    "dead": JobState.DEAD.value,
+                    "terminal": _TERMINAL,
+                },
             )
         ).one()
         waiting = row.oldest_waiting_seconds
@@ -122,6 +131,7 @@ class PostgresJobQueue:
                 "worker_id": worker_id,
                 "lease_expires_at": now + timedelta(seconds=lease_seconds),
                 "now": now,
+                "terminal": _TERMINAL,
             },
         )
         await self._session.commit()

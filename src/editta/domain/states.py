@@ -1,9 +1,11 @@
-"""AnalysisJob states + retry policy (PLAN.md §3). Pure: no I/O, no clock.
+"""AnalysisJob states, legal transitions + retry policy (PLAN.md §3). Pure: no I/O, no clock.
 
 The runner moves a job forward PENDING -> PARSING -> ANALYZING -> SYNTHESIZING ->
-EXPORTING -> COMPLETED, and a resumed job starts again at PARSING; every write is
-fenced on the lease (services/jobs.py), which is the rule that actually protects it."""
+EXPORTING -> COMPLETED, and a resumed job starts again at PARSING. Every state write is
+fenced twice in one SQL WHERE (repositories.py `set_state_if_owned`): on the lease, and
+on `ALLOWED_FROM` below, so COMPLETED and DEAD can never be left."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -18,8 +20,22 @@ class JobState(StrEnum):
     DEAD = "dead"
 
 
-# The same two names end the queue's claim query (adapters/queue/postgres.py).
+# The queue's claim and health SQL bind this set (adapters/queue/postgres.py).
 TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.DEAD})
+
+_UNFINISHED = frozenset(JobState) - TERMINAL_STATES
+
+# For each state, the states a job may enter it from. Nothing leaves COMPLETED or DEAD.
+# A new job starts PENDING by the column default, not by a transition.
+ALLOWED_FROM: Mapping[JobState, frozenset[JobState]] = {
+    JobState.PENDING: _UNFINISHED,  # retry after a failed attempt
+    JobState.PARSING: _UNFINISHED,  # first run, or a resume after a crash or retry
+    JobState.ANALYZING: frozenset({JobState.PARSING}),
+    JobState.SYNTHESIZING: frozenset({JobState.ANALYZING}),
+    JobState.EXPORTING: frozenset({JobState.SYNTHESIZING}),
+    JobState.COMPLETED: frozenset({JobState.EXPORTING}),
+    JobState.DEAD: _UNFINISHED,  # failure, or attempts exhausted at claim
+}
 
 # `failure_kind` of a job that died because of what the customer uploaded (an unreadable
 # file, a manuscript too long or too costly). It is refunded and needs no operator.

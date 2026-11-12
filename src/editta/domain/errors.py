@@ -64,6 +64,12 @@ class LeaseLost(EdittaError):
     it). Not a job failure: the runner stops writing and records nothing."""
 
 
+class IllegalJobTransition(LeaseLost):
+    """A state write the transition table forbids (domain/states.py `ALLOWED_FROM`), e.g.
+    out of COMPLETED. A LeaseLost so the runner does what it does when it loses the job:
+    stop writing, record nothing."""
+
+
 class BudgetExceeded(EdittaError):
     """Projected job cost exceeds the configured ceiling. Deterministic for a given input."""
 

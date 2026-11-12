@@ -9,8 +9,10 @@ from editta.domain.errors import (
     ParseError,
 )
 from editta.domain.states import (
+    ALLOWED_FROM,
     MAX_ATTEMPTS,
     RETRY_MAX_DELAY_SECONDS,
+    TERMINAL_STATES,
     JobState,
     attempts_exhausted,
     decide_after_failure,
@@ -71,3 +73,33 @@ def test_attempts_are_exhausted_only_past_the_limit() -> None:
 def test_request_rejections_are_not_retryable() -> None:
     assert not LLMRequestRejected.retryable
     assert issubclass(LLMRequestRejected, LLMError)
+
+
+# --- transitions ---------------------------------------------------------------------
+
+
+def test_every_state_has_an_entry_in_the_transition_table() -> None:
+    assert set(ALLOWED_FROM) == set(JobState)
+
+
+def test_terminal_states_are_absorbing() -> None:
+    for target, sources in ALLOWED_FROM.items():
+        assert not sources & TERMINAL_STATES, f"{target} is reachable from a terminal state"
+
+
+def test_every_unfinished_state_can_die_retry_or_resume() -> None:
+    unfinished = set(JobState) - TERMINAL_STATES
+    for target in (JobState.DEAD, JobState.PENDING, JobState.PARSING):
+        assert ALLOWED_FROM[target] == unfinished
+
+
+def test_the_pipeline_moves_forward_one_step_at_a_time() -> None:
+    steps = [
+        JobState.PARSING,
+        JobState.ANALYZING,
+        JobState.SYNTHESIZING,
+        JobState.EXPORTING,
+        JobState.COMPLETED,
+    ]
+    for previous, current in zip(steps, steps[1:], strict=False):
+        assert ALLOWED_FROM[current] == {previous}

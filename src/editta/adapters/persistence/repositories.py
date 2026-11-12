@@ -22,7 +22,8 @@ from editta.adapters.persistence.tables import (
     User,
 )
 from editta.domain.artifacts import ArtifactKind
-from editta.domain.errors import EdittaError, LeaseLost
+from editta.domain.errors import EdittaError, IllegalJobTransition, LeaseLost
+from editta.domain.states import ALLOWED_FROM, JobState
 
 MANUSCRIPT_PURGED = "purged"
 
@@ -187,25 +188,41 @@ class AnalysisJobRepository:
         job_id: UUID,
         *,
         lease_owner: str,
-        state: str,
+        state: JobState,
         error: str | None = None,
         failure_kind: str | None = None,
     ) -> None:
         """Fenced state write for the job runner: applies only while `lease_owner` still
-        holds the job. Raises LeaseLost otherwise — a worker whose lease expired must
-        not overwrite the state of a job another worker has since claimed (e.g. turn a
-        COMPLETED job back into DEAD and refund it)."""
+        holds the job, and only from a state `ALLOWED_FROM` permits. Raises LeaseLost
+        otherwise — a worker whose lease expired must not overwrite the state of a job
+        another worker has since claimed (e.g. turn a COMPLETED job back into DEAD and
+        refund it) — or IllegalJobTransition when it holds the lease but the move is
+        forbidden (nothing leaves COMPLETED or DEAD)."""
         result = await self._session.execute(
             update(AnalysisJob)
             .where(
                 AnalysisJob.tenant_id == tenant_id,
                 AnalysisJob.id == job_id,
                 AnalysisJob.lease_owner == lease_owner,
+                AnalysisJob.state.in_([s.value for s in ALLOWED_FROM[state]]),
             )
-            .values(state=state, error=error, failure_kind=failure_kind)
+            .values(state=state.value, error=error, failure_kind=failure_kind)
         )
-        if result.rowcount != 1:  # type: ignore[attr-defined]
-            raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
+        if result.rowcount == 1:  # type: ignore[attr-defined]
+            return
+        # Failure path only: one read so the log tells a lost lease from a bad transition.
+        current = (
+            await self._session.execute(
+                select(AnalysisJob.state).where(
+                    AnalysisJob.tenant_id == tenant_id,
+                    AnalysisJob.id == job_id,
+                    AnalysisJob.lease_owner == lease_owner,
+                )
+            )
+        ).scalar_one_or_none()
+        if current is not None:
+            raise IllegalJobTransition(f"job {job_id}: {current} -> {state.value} is not allowed")
+        raise LeaseLost(f"worker {lease_owner} no longer holds job {job_id}")
 
     async def record_usage(
         self,

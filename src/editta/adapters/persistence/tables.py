@@ -48,6 +48,11 @@ class User(UUIDPKMixin, TimestampMixin, Base):
 
 class Manuscript(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "manuscripts"
+    __table_args__ = (
+        CheckConstraint("status IN ('uploaded','purged')", name="ck_manuscript_status"),
+        # One fact, two columns: retention empties blob_key when it purges.
+        CheckConstraint("(status = 'purged') = (blob_key = '')", name="ck_manuscript_purged_blob"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     title: Mapped[str]
@@ -58,7 +63,19 @@ class Manuscript(UUIDPKMixin, TimestampMixin, Base):
 
 class AnalysisJob(UUIDPKMixin, TimestampMixin, Base):
     __tablename__ = "analysis_jobs"
-    __table_args__ = (CheckConstraint("attempt >= 0", name="ck_job_attempt_nonneg"),)
+    # Value lists match migration 0010 and the domain enums (tests/adapters/test_tables.py).
+    __table_args__ = (
+        CheckConstraint("attempt >= 0", name="ck_job_attempt_nonneg"),
+        CheckConstraint(
+            "state IN ('pending','parsing','analyzing','synthesizing','exporting',"
+            "'completed','dead')",
+            name="ck_job_state",
+        ),
+        CheckConstraint(
+            "failure_kind IS NULL OR (failure_kind = 'customer' AND state = 'dead')",
+            name="ck_job_failure_kind",
+        ),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     manuscript_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("manuscripts.id"), index=True)
@@ -91,7 +108,10 @@ class Report(UUIDPKMixin, TimestampMixin, Base):
     report was the only file; authorized through its job, so it has no tenant_id."""
 
     __tablename__ = "reports"
-    __table_args__ = (UniqueConstraint("job_id", "kind", name="uq_reports_job_id_kind"),)
+    __table_args__ = (
+        UniqueConstraint("job_id", "kind", name="uq_reports_job_id_kind"),
+        CheckConstraint("kind IN ('report','annotated_manuscript')", name="ck_report_kind"),
+    )
 
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_jobs.id"), index=True)
     kind: Mapped[str] = mapped_column(server_default="report")
