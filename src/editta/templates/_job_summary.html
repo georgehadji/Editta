@@ -1,0 +1,2 @@
+{# Outside the table, so a screen reader hears the change when the table is swapped. #}
+<p id="job-summary" class="visually-hidden" aria-live="polite"{% if oob %} hx-swap-oob="true"{% endif %}>{{ summary }}</p>

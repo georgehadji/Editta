@@ -17,12 +17,15 @@
         enctype="multipart/form-data"
         hx-post="/t/{{ tenant_id }}/upload" hx-target="#job-list" hx-swap="outerHTML"
         hx-encoding="multipart/form-data"
-        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+        hx-disabled-elt="find button" hx-indicator="#upload-busy">
     <label for="file">Manuscript (.docx or .pdf)</label><br>
-    <input type="file" id="file" name="file" accept=".docx,.pdf" required>
+    {% include "_file_input.html" %}
     <button type="submit">Upload &amp; analyze</button>
+    <span id="upload-busy" class="htmx-indicator">Uploading…</span>
   </form>
 
   <h2>Reports</h2>
   {% include "_job_list.html" %}
+  {% include "_job_summary.html" %}
 {% endblock %}

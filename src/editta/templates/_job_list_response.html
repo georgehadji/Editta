@@ -1,0 +1,8 @@
+{# What a poll or an upload answers: the table, plus out-of-band updates elsewhere on the page. #}
+{% include "_job_list.html" %}
+{% with oob = true %}{% include "_job_summary.html" %}{% endwith %}
+{% if after_upload %}
+<div id="upload-error" hx-swap-oob="true"></div>
+<div id="htmx-error" class="error-text" role="alert" hx-swap-oob="true"></div>
+{% with oob = true %}{% include "_file_input.html" %}{% endwith %}
+{% endif %}

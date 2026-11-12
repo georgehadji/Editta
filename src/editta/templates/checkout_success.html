@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Payment received — Editta{% endblock %}
+{% block body %}
+  <h1>Payment received</h1>
+  <p>Your credits are added as soon as Stripe confirms the payment, usually within a minute.
+    A bank transfer or SEPA debit can take a few days.</p>
+  {% if tenant_id %}
+  <p><a href="/t/{{ tenant_id }}/dashboard">Back to your dashboard</a></p>
+  {% endif %}
+{% endblock %}
