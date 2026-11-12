@@ -5,7 +5,8 @@ structured editorial report (language/style, structure/argument, metadata/positi
 integrity-light) to support human editors. Never renders accept/reject verdicts, quality scores,
 AI-detection, or plagiarism results.
 
-Architecture and full build plan: [docs/PLAN.md](docs/PLAN.md).
+Architecture and full build plan: [docs/PLAN.md](docs/PLAN.md). Every state machine (jobs,
+leases, credits, billing, sessions, breaker): [docs/STATE_MACHINES.md](docs/STATE_MACHINES.md).
 
 ## Dev setup
 

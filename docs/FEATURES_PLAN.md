@@ -236,6 +236,9 @@ can decide what to read in full. Descriptive only: no score, no ranking, no acce
 
 ### 3.2 Overnight batch mode
 
+> Before building this, read docs/STATE_MACHINES_PLAN.md item 9: model `AWAITING_BATCH`
+> with explicit `batch_submit_token` and `batch_id` columns, not a `'pending:<uuid>'` marker.
+
 PLAN.md Phase 5 planned this behind the `LLMClient` port. A batch result arrives hours
 later, so it does not fit `analyze()` (request → response). It gets its own port:
 

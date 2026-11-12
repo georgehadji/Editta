@@ -3,7 +3,7 @@
 The runner moves a job forward PENDING -> PARSING -> ANALYZING -> SYNTHESIZING ->
 EXPORTING -> COMPLETED, and a resumed job starts again at PARSING. Every state write is
 fenced twice in one SQL WHERE (repositories.py `set_state_if_owned`): on the lease, and
-on `ALLOWED_FROM` below, so COMPLETED and DEAD can never be left."""
+on `ALLOWED_FROM` below, so COMPLETED and DEAD can never be left. See docs/STATE_MACHINES.md."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass
