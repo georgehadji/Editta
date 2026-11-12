@@ -2,14 +2,72 @@ import asyncio
 import time
 
 import pytest
+from structlog.testing import capture_logs
 
-from editta.adapters.llm.resilience import COOLDOWN_SECONDS, CircuitBreaker, TokenBucket
+from editta.adapters.llm.resilience import (
+    COOLDOWN_SECONDS,
+    BreakerState,
+    CircuitBreaker,
+    TokenBucket,
+)
 from editta.domain.errors import LLMError
 
 
 def test_circuit_breaker_closed_by_default() -> None:
     breaker = CircuitBreaker()
     breaker.before_call()  # must not raise
+
+
+def test_circuit_breaker_state_transitions() -> None:
+    breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=60.0)
+    assert breaker.state is BreakerState.CLOSED
+
+    breaker.record_failure()
+    breaker.record_failure()
+    assert breaker.state is BreakerState.OPEN
+
+    breaker._opened_at = time.monotonic() - 61  # cooldown over
+    assert breaker.state is BreakerState.HALF_OPEN
+
+    breaker.record_success()
+    assert breaker.state is BreakerState.CLOSED
+
+
+def test_circuit_breaker_failed_probe_reopens() -> None:
+    breaker = CircuitBreaker(failure_threshold=1, cooldown_seconds=60.0)
+    breaker.record_failure()
+    breaker._opened_at = time.monotonic() - 61
+    breaker.before_call()  # the probe
+    assert breaker.state is BreakerState.OPEN  # probe admission re-stamps the cooldown
+
+    with capture_logs() as logs:
+        breaker.record_failure()
+    assert breaker.state is BreakerState.OPEN
+    assert [entry["event"] for entry in logs] == ["llm.breaker_opened"]
+
+
+def test_circuit_breaker_logs_each_transition_once() -> None:
+    breaker = CircuitBreaker(failure_threshold=5, cooldown_seconds=60.0)
+    with capture_logs() as logs:
+        for _ in range(5):
+            breaker.record_failure()
+        breaker.record_failure()  # already open: no new transition logged
+    opened = [entry for entry in logs if entry["event"] == "llm.breaker_opened"]
+    assert len(opened) == 1
+    assert opened[0]["consecutive_failures"] == 5
+
+    breaker._opened_at = time.monotonic() - 61
+    with capture_logs() as logs:
+        breaker.before_call()  # probe admitted
+        breaker.record_success()  # probe succeeded: closed
+    assert [entry["event"] for entry in logs] == ["llm.breaker_probe", "llm.breaker_closed"]
+
+
+def test_circuit_breaker_success_on_closed_logs_nothing() -> None:
+    breaker = CircuitBreaker()
+    with capture_logs() as logs:
+        breaker.record_success()
+    assert logs == []
 
 
 def test_circuit_breaker_opens_after_threshold_failures() -> None:

@@ -2,13 +2,16 @@
   <thead><tr><th>Manuscript</th><th>Status</th><th></th></tr></thead>
   <tbody>
     {% for job in jobs %}
+    {% set view = views[job.id] %}
     <tr>
       <td>{{ titles.get(job.manuscript_id, "manuscript") }}</td>
-      <td class="state">{{ job.state }}{% if job.error %} — <span class="error-text">{{ job.error }}</span>{% endif %}</td>
+      <td class="state" data-phase="{{ view.phase }}">{{ view.label }}
+        {%- if view.message %} — <span class="{{ 'error-text' if view.terminal else 'note-text' }}">{{ view.message }}</span>{% endif %}
+        {%- if view.hint %}<span class="hint">{{ view.hint }}</span>{% endif %}</td>
       <td>
-        {% if job.state == "completed" %}
+        {% if view.downloadable %}
           <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/artifacts/report">download report</a>
-          {% if "annotated_manuscript" in artifacts.get(job.id, ()) %}
+          {% if "annotated_manuscript" in view.artifacts %}
           · <a href="/t/{{ tenant_id }}/jobs/{{ job.id }}/artifacts/annotated_manuscript">download with comments (.docx)</a>
           {% endif %}
         {% endif %}

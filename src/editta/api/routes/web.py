@@ -5,7 +5,6 @@ tenant admin shares this tenant-specific login URL with their editors directly.
 
 import hmac
 import secrets
-from collections.abc import Iterable
 from typing import Annotated
 from uuid import UUID
 
@@ -50,8 +49,8 @@ from editta.api.middleware import SIGN_IN_LINK_LIMIT, limiter, new_csrf_cookie_v
 from editta.config import Settings
 from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
+from editta.domain.job_view import job_view
 from editta.domain.ports import BlobStore, EmailSender
-from editta.domain.states import TERMINAL_STATES, JobState
 from editta.services.accounts import (
     SESSION_MAX_AGE_SECONDS,
     AccountService,
@@ -332,11 +331,17 @@ async def _job_list_context(
     reports: ReportRepository,
 ) -> dict[str, object]:
     job_list = await jobs.list_for_tenant(tenant_id)
+    kinds = await reports.kinds_by_job([j.id for j in job_list])
+    views = {
+        j.id: job_view(j.state, j.error, j.failure_kind, kinds.get(j.id, ())) for j in job_list
+    }
     return {
         "tenant_id": tenant_id,
         "jobs": job_list,
-        "polling": _any_job_running(j.state for j in job_list),
-        "artifacts": await reports.kinds_by_job([j.id for j in job_list]),
+        "views": views,
+        # Once every job is finished the table stops asking for itself; an upload brings a
+        # fresh table that starts again.
+        "polling": any(not v.terminal for v in views.values()),
         "titles": await manuscripts.titles(tenant_id, [j.manuscript_id for j in job_list]),
     }
 
@@ -351,12 +356,6 @@ async def _job_list(
 ) -> HTMLResponse:
     context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
     return templates.TemplateResponse(request, "_job_list.html", context)
-
-
-def _any_job_running(states: Iterable[str]) -> bool:
-    """Whether the job table still has something to wait for. Once every job is finished
-    the table stops asking for itself; an upload brings a fresh table that starts again."""
-    return any(JobState(state) not in TERMINAL_STATES for state in states)
 
 
 @router.get("/t/{tenant_id}/jobs/{job_id}/artifacts/{kind}")

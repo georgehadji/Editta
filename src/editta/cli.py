@@ -12,11 +12,14 @@ over HTTP. Admins then invite others via POST /auth/invite.
 
 import argparse
 import asyncio
+import json
 import os
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -24,12 +27,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from editta.adapters.export.docx_builder import ReportDocxBuilder
 from editta.adapters.llm import build_llm_client
 from editta.adapters.persistence.repositories import (
+    AnalysisJobRepository,
     CreditLedgerRepository,
+    ReportRepository,
     TenantRepository,
     UserRepository,
 )
 from editta.adapters.persistence.uow import UnitOfWork
 from editta.domain.errors import EdittaError
+from editta.domain.job_view import job_view, lease_status
 from editta.services.accounts import AccountService
 from editta.services.pipeline import run_pipeline
 
@@ -69,12 +75,19 @@ def main() -> None:
     grant.add_argument("--tenant", required=True, type=UUID)
     grant.add_argument("--credits", required=True, type=int, help="negative after a refund")
 
+    jobs = subparsers.add_parser(
+        "jobs", help="operator: list a tenant's jobs with their phase and lease (read-only)"
+    )
+    jobs.add_argument("--tenant", required=True, type=UUID)
+    jobs.add_argument("--json", action="store_true", help="one JSON object per line")
+
     args = parser.parse_args()
     commands = {
         "analyze": _analyze,
         "create-tenant": _create_tenant,
         "add-user": _add_user,
         "grant-credits": _grant_credits,
+        "jobs": _jobs,
     }
     try:
         commands[args.command](args)
@@ -174,6 +187,45 @@ async def grant_credits(uow: UnitOfWork, tenant_id: UUID, credits: int) -> int:
             idempotency_key=f"grant:{uuid4()}",
         )
         return await ledger.balance(tenant_id)
+
+
+def _jobs(args: argparse.Namespace) -> None:
+    async def run() -> list[dict[str, object]]:
+        engine = create_async_engine(_require_env("EDITTA_DATABASE_URL"))
+        try:
+            uow = UnitOfWork(async_sessionmaker(engine, expire_on_commit=False))
+            async with uow.begin(args.tenant) as session:
+                job_list = await AnalysisJobRepository(session).list_for_tenant(args.tenant)
+                kinds = await ReportRepository(session).kinds_by_job([j.id for j in job_list])
+        finally:
+            await engine.dispose()
+        now = datetime.now(UTC)
+        return [job_row(j, kinds.get(j.id, set()), now) for j in job_list]
+
+    for row in asyncio.run(run()):
+        if args.json:
+            print(json.dumps(row))
+        else:
+            print(
+                f"{row['job_id']}  {row['phase']:<13} {row['state']:<12} "
+                f"attempt {row['attempt']}  lease {row['lease']}"
+                + (f"  — {row['error']}" if row["error"] else "")
+            )
+
+
+def job_row(job: Any, kinds: Collection[str], now: datetime) -> dict[str, object]:
+    """One job as the dashboard sees it (domain/job_view.py) plus what only an operator
+    needs: the raw state, the attempt count and who may claim it next."""
+    view = job_view(job.state, job.error, job.failure_kind, kinds)
+    return {
+        "job_id": str(job.id),
+        "phase": view.phase.value,
+        "state": job.state,
+        "attempt": job.attempt,
+        "lease": lease_status(job.lease_owner, job.lease_expires_at, now).value,
+        "error": job.error,
+        "artifacts": [k.value for k in view.artifacts],
+    }
 
 
 async def _with_accounts[R](action: Callable[[AccountService], Awaitable[R]]) -> R:

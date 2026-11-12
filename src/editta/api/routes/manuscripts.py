@@ -34,6 +34,7 @@ from editta.api.schemas import (
 from editta.config import Settings
 from editta.domain.artifacts import ArtifactKind
 from editta.domain.errors import InsufficientCredits, NotFound, ParseError
+from editta.domain.job_view import job_view
 from editta.domain.ports import BlobStore
 from editta.services.accounts import AuthenticatedUser
 from editta.services.reports import report_download
@@ -83,11 +84,25 @@ async def get_job_status(
     job_id: UUID,
     auth: Annotated[AuthenticatedUser, Depends(get_current_auth)],
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
+    reports: Annotated[ReportRepository, Depends(get_report_repo)],
 ) -> Envelope[JobStatusResponse]:
     job = await jobs.get_by_id(auth.tenant_id, job_id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-    return Envelope.ok(JobStatusResponse(job_id=job.id, state=job.state, error=job.error))
+    kinds = (await reports.kinds_by_job([job.id])).get(job.id, set())
+    view = job_view(job.state, job.error, job.failure_kind, kinds)
+    return Envelope.ok(
+        JobStatusResponse(
+            job_id=job.id,
+            state=job.state,
+            error=job.error,
+            phase=view.phase,
+            terminal=view.terminal,
+            refunded=view.refunded,
+            next_action=view.next_action,
+            artifacts=list(view.artifacts),
+        )
+    )
 
 
 @router.get("/jobs/{job_id}/artifacts/{kind}")
