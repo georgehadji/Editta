@@ -342,6 +342,19 @@ def test_a_poll_updates_the_summary_but_leaves_errors_alone(client: TestClient) 
     poll = client.get(f"/t/{TENANT_ID}/jobs-fragment", headers={"HX-Request": "true"})
     assert 'id="job-summary"' in poll.text
     assert "upload-error" not in poll.text
+    assert 'id="htmx-error"' not in poll.text  # an upload's error stays until the next upload
+    # ...but a good poll clears the message an earlier failed poll left.
+    assert '<div id="poll-error" class="error-text" role="alert" hx-swap-oob="true">' in poll.text
+
+
+def test_a_failed_poll_puts_its_message_where_the_next_poll_clears_it(
+    client: TestClient,
+) -> None:
+    _sign_in(client)
+    other_tenant = "00000000-0000-0000-0000-000000000000"
+    poll = client.get(f"/t/{other_tenant}/jobs-fragment", headers={"HX-Request": "true"})
+    assert poll.status_code >= 400
+    assert poll.headers["HX-Retarget"] == "#poll-error"
 
 
 def test_checkout_success_links_back_to_the_dashboard(client: TestClient) -> None:
