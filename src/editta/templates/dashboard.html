@@ -3,9 +3,7 @@
 {% block body %}
   <header>
     <h1>Editta</h1>
-    <div class="credit-balance">{{ credit_balance }} credits —
-      <a href="/billing/checkout">buy more</a>
-    </div>
+    {% include "_credit_balance.html" %}
   </header>
   <p class="signed-in">Signed in as <strong>{{ email }}</strong> · workspace <code>{{ tenant_id }}</code>
     <button hx-post="/t/{{ tenant_id }}/logout"

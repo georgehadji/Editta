@@ -272,14 +272,13 @@ async def dashboard(
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
-    context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
+    context = await _job_list_context(tenant_id, jobs, manuscripts, reports, ledger)
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
             **context,
             "email": auth.email,
-            "credit_balance": await ledger.balance(tenant_id),
             "csrf_token": request.cookies.get("editta_csrf", ""),
         },
     )
@@ -293,10 +292,11 @@ async def jobs_fragment(
     jobs: Annotated[AnalysisJobRepository, Depends(get_job_repo)],
     manuscripts: Annotated[ManuscriptRepository, Depends(get_manuscript_repo)],
     reports: Annotated[ReportRepository, Depends(get_report_repo)],
+    ledger: Annotated[CreditLedgerRepository, Depends(get_ledger_repo)],
     templates: Annotated[Jinja2Templates, Depends(get_templates)],
 ) -> HTMLResponse:
     _require_matching_tenant(auth, tenant_id)
-    return await _job_list(request, tenant_id, jobs, manuscripts, reports, templates)
+    return await _job_list(request, tenant_id, jobs, manuscripts, reports, ledger, templates)
 
 
 @router.post("/t/{tenant_id}/upload", response_class=HTMLResponse)
@@ -341,7 +341,7 @@ async def upload_via_web(
         return _upload_error(request, templates, message=str(exc), status_code=code)
 
     return await _job_list(
-        request, tenant_id, jobs, manuscripts, reports, templates, after_upload=True
+        request, tenant_id, jobs, manuscripts, reports, ledger, templates, after_upload=True
     )
 
 
@@ -350,6 +350,7 @@ async def _job_list_context(
     jobs: AnalysisJobRepository,
     manuscripts: ManuscriptRepository,
     reports: ReportRepository,
+    ledger: CreditLedgerRepository,
 ) -> dict[str, object]:
     job_list = await jobs.list_for_tenant(tenant_id)
     kinds = await reports.kinds_by_job([j.id for j in job_list])
@@ -365,6 +366,7 @@ async def _job_list_context(
         "polling": any(not v.terminal for v in views.values()),
         "summary": _summary(views.values()),
         "titles": await manuscripts.titles(tenant_id, [j.manuscript_id for j in job_list]),
+        "credit_balance": await ledger.balance(tenant_id),
     }
 
 
@@ -374,11 +376,12 @@ async def _job_list(
     jobs: AnalysisJobRepository,
     manuscripts: ManuscriptRepository,
     reports: ReportRepository,
+    ledger: CreditLedgerRepository,
     templates: Jinja2Templates,
     *,
     after_upload: bool = False,
 ) -> HTMLResponse:
-    context = await _job_list_context(tenant_id, jobs, manuscripts, reports)
+    context = await _job_list_context(tenant_id, jobs, manuscripts, reports, ledger)
     return templates.TemplateResponse(
         request, "_job_list_response.html", {**context, "after_upload": after_upload}
     )
