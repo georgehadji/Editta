@@ -19,8 +19,23 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Chromium for the browser test (tests/e2e)
-        run: python -m playwright install --with-deps chromium
+      # The browser test (tests/e2e) needs only Chromium's headless shell. The runner
+      # image already has the system libraries it needs, so no --with-deps (apt took
+      # ~20 s); the binary itself is cached per Playwright version.
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(python -c 'import importlib.metadata as m; print(m.version("playwright"))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Chromium headless shell
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --only-shell chromium
 
       - name: Ruff
         run: ruff check src tests evals
