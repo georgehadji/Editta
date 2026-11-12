@@ -1,0 +1,4 @@
+{# Sent again with every poll and upload, so a reservation, refund or purchase shows without a reload. #}
+<div id="credit-balance" class="credit-balance"{% if oob %} hx-swap-oob="true"{% endif %}>{{ credit_balance }} credits —
+  <a href="/billing/checkout">buy more</a>
+</div>

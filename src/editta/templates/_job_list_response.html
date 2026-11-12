@@ -1,6 +1,7 @@
 {# What a poll or an upload answers: the table, plus out-of-band updates elsewhere on the page. #}
 {% include "_job_list.html" %}
 {% with oob = true %}{% include "_job_summary.html" %}{% endwith %}
+{% with oob = true %}{% include "_credit_balance.html" %}{% endwith %}
 {# A good answer ends any earlier failed poll's message (main.py sends those here). #}
 <div id="poll-error" class="error-text" role="alert" hx-swap-oob="true"></div>
 {% if after_upload %}

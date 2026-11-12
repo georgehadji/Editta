@@ -347,6 +347,20 @@ def test_a_poll_updates_the_summary_but_leaves_errors_alone(client: TestClient) 
     assert '<div id="poll-error" class="error-text" role="alert" hx-swap-oob="true">' in poll.text
 
 
+def test_the_header_balance_follows_polls_and_uploads(client: TestClient) -> None:
+    """The dashboard header showed the balance from page load until a reload."""
+    _sign_in(client)
+    poll = client.get(f"/t/{TENANT_ID}/jobs-fragment", headers={"HX-Request": "true"})
+    assert 'id="credit-balance" class="credit-balance" hx-swap-oob="true">3 credits' in poll.text
+
+    upload = client.post(
+        f"/t/{TENANT_ID}/upload",
+        files={"file": ("essay.docx", _docx_bytes())},
+        headers={"X-CSRF-Token": client.cookies.get("editta_csrf"), "HX-Request": "true"},
+    )
+    assert 'hx-swap-oob="true">2 credits' in upload.text  # the reservation shows at once
+
+
 def test_a_failed_poll_puts_its_message_where_the_next_poll_clears_it(
     client: TestClient,
 ) -> None:
