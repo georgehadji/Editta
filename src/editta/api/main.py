@@ -8,7 +8,7 @@ import re
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -76,12 +76,25 @@ async def _browser_errors(request: Request, exc: StarletteHTTPException) -> Resp
         if request.method == "GET":
             return RedirectResponse(login, status_code=303)
     if tenant and htmx:
-        poll = request.url.path.endswith("/jobs-fragment")
-        headers = {"HX-Retarget": "#poll-error"} if poll else None
-        return HTMLResponse(
-            html.escape(str(exc.detail)), status_code=exc.status_code, headers=headers
-        )
+        return _htmx_error(request, str(exc.detail), exc.status_code)
     return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(Exception)
+async def _browser_crashes(request: Request, exc: Exception) -> Response:
+    """An unhandled error. Starlette still logs and re-raises it; this only words the
+    answer, which for htmx on a signed-in page was a bare "Internal Server Error" in the
+    upload's alert region, even when a poll failed."""
+    if _TENANT_PAGE.match(request.url.path) and request.headers.get("HX-Request") == "true":
+        return _htmx_error(request, "Something went wrong on our side. Try again in a moment.", 500)
+    return PlainTextResponse("Internal Server Error", status_code=500)
+
+
+def _htmx_error(request: Request, text: str, status_code: int) -> HTMLResponse:
+    # A failed poll's text goes to #poll-error, which the next good poll clears.
+    poll = request.url.path.endswith("/jobs-fragment")
+    headers = {"HX-Retarget": "#poll-error"} if poll else None
+    return HTMLResponse(html.escape(text), status_code=status_code, headers=headers)
 
 
 app.add_middleware(SlowAPIMiddleware)

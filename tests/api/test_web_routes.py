@@ -391,6 +391,31 @@ def test_a_failed_poll_puts_its_message_where_the_next_poll_clears_it(
     assert poll.headers["HX-Retarget"] == "#poll-error"
 
 
+def test_a_crash_is_worded_for_htmx_and_a_crashed_poll_goes_to_the_poll_region(
+    client: TestClient,
+) -> None:
+    """An unhandled error skips the HTTPException handler; it used to reach the page as a
+    bare "Internal Server Error" in the upload's alert region."""
+    _sign_in(client)
+
+    class BrokenJobs:
+        async def list_for_tenant(self, tenant_id: object) -> None:
+            raise RuntimeError("database fell over")
+
+    app.dependency_overrides[get_job_repo] = lambda: BrokenJobs()
+    quiet = TestClient(
+        app, base_url="https://testserver", raise_server_exceptions=False, cookies=client.cookies
+    )
+    poll = quiet.get(f"/t/{TENANT_ID}/jobs-fragment", headers={"HX-Request": "true"})
+    assert poll.status_code == 500
+    assert poll.headers["HX-Retarget"] == "#poll-error"
+    assert "Something went wrong on our side" in poll.text
+    assert "database fell over" not in poll.text
+
+    page = quiet.get(f"/t/{TENANT_ID}/dashboard")  # not htmx: unchanged
+    assert (page.status_code, page.text) == (500, "Internal Server Error")
+
+
 def test_checkout_success_links_back_to_the_dashboard(client: TestClient) -> None:
     anonymous = client.get("/billing/success")
     assert anonymous.status_code == 200
