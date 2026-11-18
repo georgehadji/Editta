@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from editta.adapters.export.docx_builder import ReportDocxBuilder
@@ -81,6 +82,8 @@ def main() -> None:
     jobs.add_argument("--tenant", required=True, type=UUID)
     jobs.add_argument("--json", action="store_true", help="one JSON object per line")
 
+    # Same file and precedence as Settings: ./.env, and the real environment wins.
+    load_dotenv(".env")
     args = parser.parse_args()
     commands = {
         "analyze": _analyze,
