@@ -44,13 +44,15 @@ PASS_LABELS = {
     "language": "Γλώσσα",
     "integrity": "Ακεραιότητα",
 }
+SEVERITY_LABELS = {"minor": "ήσσον", "moderate": "μέτριο", "major": "σοβαρό"}
 SUGGESTION_LABEL = "Πρόταση"
 MACHINE_NOTE = "Αυτόματη παρατήρηση του Editta: η κρίση ανήκει στον επιμελητή."
 
 
 def comment_text(pass_name: str, finding: Finding) -> str:
     label = PASS_LABELS.get(pass_name, pass_name)
-    lines = [f"[{finding.severity.value}] {label} — {finding.issue}"]
+    severity = SEVERITY_LABELS[finding.severity.value]
+    lines = [f"[{severity}] {label} — {finding.issue}"]
     if finding.suggestion:
         lines.append(f"{SUGGESTION_LABEL}: {finding.suggestion}")
     text = strip_xml_illegal("\n".join(lines))

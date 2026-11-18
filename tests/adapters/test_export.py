@@ -57,6 +57,14 @@ def test_build_produces_valid_docx_with_no_score_or_verdict_text() -> None:
         assert banned not in full_text
 
 
+def test_the_report_labels_are_greek() -> None:
+    document = docx.Document(io.BytesIO(ReportDocxBuilder(REPORT).build()))
+    full_text = "\n".join(p.text for p in document.paragraphs)
+
+    assert "Επισκόπηση" in full_text and "Πρόταση:" in full_text
+    assert "Suggestion" not in full_text and "Overview" not in full_text
+
+
 def test_control_characters_in_model_text_do_not_fail_the_report() -> None:
     """The model's own words (not only the manuscript's) can carry characters XML forbids."""
     dirty = FINDING.model_copy(

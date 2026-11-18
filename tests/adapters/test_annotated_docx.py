@@ -328,7 +328,7 @@ def test_an_overlong_comment_is_cut_and_the_file_stays_valid() -> None:
 
 def test_the_comment_names_the_pass_the_severity_and_that_it_is_machine_made() -> None:
     text = comment_text("language", _finding("q", issue="πρόβλημα", suggestion="διόρθωση"))
-    assert text.startswith("[major] Γλώσσα — πρόβλημα")
+    assert text.startswith("[σοβαρό] Γλώσσα — πρόβλημα")
     assert "Πρόταση: διόρθωση" in text
     assert "Αυτόματη" in text
 
