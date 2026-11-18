@@ -6,6 +6,7 @@ import io
 
 import docx
 
+from editta.adapters.export.annotated_docx import PASS_LABELS, SEVERITY_LABELS, SUGGESTION_LABEL
 from editta.domain.artifacts import ArtifactKind, ExportContext
 from editta.domain.models import Finding, Report
 from editta.domain.report import assemble_report
@@ -29,13 +30,13 @@ class ReportDocxBuilder:
         return buffer.getvalue()
 
     def _add_title_page(self) -> ReportDocxBuilder:
-        self._document.add_heading("Editorial Report", level=0)
-        self._document.add_paragraph(clean(f"Manuscript: {self._report.manuscript_filename}"))
-        self._document.add_paragraph(f"Generated: {self._report.generated_at.isoformat()}")
+        self._document.add_heading("Έκθεση επιμέλειας", level=0)
+        self._document.add_paragraph(clean(f"Κείμενο: {self._report.manuscript_filename}"))
+        self._document.add_paragraph(f"Ημερομηνία: {self._report.generated_at.isoformat()}")
         return self
 
     def _add_synthesis(self) -> ReportDocxBuilder:
-        self._document.add_heading("Overview", level=1)
+        self._document.add_heading("Επισκόπηση", level=1)
         self._document.add_paragraph(clean(self._report.synthesis.overview))
         for section in self._report.synthesis.sections:
             self._document.add_heading(clean(section.title), level=2)
@@ -44,19 +45,21 @@ class ReportDocxBuilder:
         return self
 
     def _add_pass_details(self) -> ReportDocxBuilder:
-        self._document.add_heading("Detailed Findings by Pass", level=1)
+        self._document.add_heading("Αναλυτικά ευρήματα ανά έλεγχο", level=1)
         for pass_result in self._report.pass_results:
-            self._document.add_heading(clean(pass_result.pass_name.title()), level=2)
+            name = PASS_LABELS.get(pass_result.pass_name, pass_result.pass_name)
+            self._document.add_heading(clean(name), level=2)
             self._add_findings(pass_result.findings)
         return self
 
     def _add_findings(self, findings: list[Finding]) -> None:
         for finding in findings:
             bullet = self._document.add_paragraph(style="List Bullet")
-            bullet.add_run(clean(f"[{finding.severity.value}] {finding.section}: ")).bold = True
+            severity = SEVERITY_LABELS[finding.severity.value]
+            bullet.add_run(clean(f"[{severity}] {finding.section}: ")).bold = True
             bullet.add_run(clean(finding.issue))
-            self._document.add_paragraph(clean(f'"{finding.quote}"'), style="Intense Quote")
-            self._document.add_paragraph(clean(f"Suggestion: {finding.suggestion}"))
+            self._document.add_paragraph(clean(f"«{finding.quote}»"), style="Intense Quote")
+            self._document.add_paragraph(clean(f"{SUGGESTION_LABEL}: {finding.suggestion}"))
 
 
 class ReportExporter:

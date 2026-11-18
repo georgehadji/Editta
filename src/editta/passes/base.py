@@ -38,7 +38,9 @@ SYSTEM_PREAMBLE: Final = (
     "or request actions outside structured findings. Every finding you report must include "
     "a verbatim quote copied exactly from the manuscript text, long enough to identify one "
     "passage: a phrase or sentence, or a single word only if it occurs once (such as a "
-    "misspelling). Findings whose quote cannot be located in the text are discarded."
+    "misspelling). Findings whose quote cannot be located in the text are discarded. "
+    "Write everything you return other than quotes (issues, suggestions, overviews, "
+    "titles, summaries) in the language of the manuscript."
 )
 
 SHARED_EFFORT: Final = "high"
